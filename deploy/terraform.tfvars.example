@@ -1,0 +1,64 @@
+project_id = "acme-tf"
+region     = "us-central1"
+
+github_app_id = "1234567"
+
+plan_image  = "us-central1-docker.pkg.dev/acme-tf/tf-on-github/plan:1.9.8-abc1234"
+apply_image = "us-central1-docker.pkg.dev/acme-tf/tf-on-github/apply:1.9.8-abc1234"
+
+plan_bucket_name         = "acme-tf-plans"
+coordination_bucket_name = "acme-tf-runs"
+apply_log_bucket_name    = "acme-tf-apply-logs"
+log_retention_days       = 90
+
+# Onboarded repos and the ONE ref each one's config is read from. Lives here, not in the repo,
+# because the trust anchor cannot be named by the thing it anchors — see DESIGN.md 3.1.2.
+repos = {
+  "acme/infra" = { config_ref = "refs/heads/main" }
+}
+
+provider_mirror_url = "https://tf-mirror.internal.acme.dev/"
+vpc_connector       = "projects/acme-tf/locations/us-central1/connectors/tf-egress"
+
+# One entry per workspace any onboarded repo declares. A repo's YAML can only name identities
+# that exist here — adding a workspace is a reviewed change in this file, not self-service.
+#
+# apply_roles is the number to argue about in review. Curate it: a workspace that manages DNS
+# has no business being able to delete a database. roles/editor here would throw away most of
+# what the two-service split buys.
+workspaces = {
+  prod-networking = {
+    target_project = "acme-prod"
+    state_bucket   = "acme-tfstate-prod"
+    state_prefix   = "prod/networking"
+    plan_roles     = ["roles/viewer"]
+    apply_roles = [
+      "roles/compute.networkAdmin",
+      "roles/compute.securityAdmin",
+      "roles/dns.admin",
+    ]
+  }
+
+  prod-data = {
+    target_project = "acme-prod"
+    state_bucket   = "acme-tfstate-prod"
+    state_prefix   = "prod/data"
+    plan_roles     = ["roles/viewer"]
+    apply_roles = [
+      "roles/cloudsql.admin",
+      "roles/bigquery.admin",
+      "roles/storage.admin",
+    ]
+  }
+
+  # Developers merge to `integration` freely, so this identity IS the blast radius of that
+  # privilege. Broader here is a defensible call — but it is a call, so make it explicitly rather
+  # than by copying the prod block and widening it later.
+  integration = {
+    target_project = "acme-integration"
+    state_bucket   = "acme-tfstate-integration"
+    state_prefix   = "integration"
+    plan_roles     = ["roles/viewer"]
+    apply_roles    = ["roles/editor"]
+  }
+}
