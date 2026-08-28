@@ -4,9 +4,14 @@ A GitHub App that plans Terraform on pull requests and applies **the reviewed pl
 merge — with the planner and the applier as two Cloud Run services that cannot do each
 other's job.
 
-> **Status: scaffold.** `docs/DESIGN.md` is the real artifact. The Go tree and `deploy/` are a
-> scaffold: types, signatures, IAM wiring and the decisions written down where they belong.
-> Handlers return `errNotImplemented`.
+> **Status.** `docs/DESIGN.md` is the design. The packages both tiers share —
+> `internal/config`, `internal/scope`, `internal/tf`, `internal/plan`, `internal/store` — are
+> implemented and tested: the trusted-ref config load, workspace scoping, checkout, the
+> Terraform wrapper, the module-source allowlist, plan keying and summary rendering.
+>
+> What is still a scaffold is the service half: App auth, GCS artifacts, the coordination
+> bucket, KMS signing, and the two workers in `cmd/*-service`, which return
+> `errNotImplemented`. Nothing runs end to end yet. `deploy/` is likewise ahead of the code.
 
 ## The shape
 

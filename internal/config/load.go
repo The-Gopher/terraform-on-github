@@ -1,15 +1,17 @@
 package config
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"path"
 	"regexp"
 	"strings"
 	"time"
-)
 
-var errNotImplemented = errors.New("not implemented")
+	"gopkg.in/yaml.v3"
+)
 
 // nameRE constrains Workspace.Name: it becomes part of several GCS object keys and a GitHub
 // check-run name.
@@ -64,12 +66,50 @@ type Loader struct {
 // `integration` is planned and applied with it. "Base branch" is a proxy for "reviewed" that only
 // holds when the base happens to be protected. See DESIGN.md §3.1.
 func (l *Loader) LoadFromTrustedRef(ctx context.Context, owner, repo string) (cfg *Config, configSHA string, err error) {
-	// ref := l.Trusted[owner+"/"+repo]           // "" → default branch
-	// configSHA, err = l.Contents.ResolveRef(ctx, owner, repo, ref)
-	// raw, err := l.Contents.ReadFileAtSHA(ctx, owner, repo, Filename, configSHA)
-	// if errors.Is(err, ghapp.ErrNotFound) { return nil, configSHA, ErrNoConfig }
-	// cfg, err = Parse(raw); cfg.Normalize(); return cfg, configSHA, cfg.Validate()
-	return nil, "", errNotImplemented
+	// The ref comes from the Loader's own map, never from an argument. An API that accepted a ref
+	// would let a call site pass the PR's base branch, which is the bug in DESIGN.md 3.1.1 — and
+	// it would be indistinguishable from correct use at the call site.
+	ref := l.Trusted[owner+"/"+repo] // "" means the repository's default branch
+
+	configSHA, err = l.Contents.ResolveRef(ctx, owner, repo, ref)
+	if err != nil {
+		return nil, "", fmt.Errorf("resolving trusted ref %q for %s/%s: %w", refName(ref), owner, repo, err)
+	}
+
+	raw, err := l.Contents.ReadFileAtSHA(ctx, owner, repo, Filename, configSHA)
+	if err != nil {
+		if errors.Is(err, ErrFileNotFound) {
+			return nil, configSHA, ErrNoConfig
+		}
+		return nil, configSHA, fmt.Errorf("reading %s at %s: %w", Filename, short(configSHA), err)
+	}
+
+	cfg, err = ParseAndValidate(raw)
+	if err != nil {
+		// Name the ref in the error. "Your config is invalid" sends people to the file in their
+		// branch, which is not the file that was read.
+		return nil, configSHA, fmt.Errorf("%s at %s (%s): %w", Filename, refName(ref), short(configSHA), err)
+	}
+	return cfg, configSHA, nil
+}
+
+// ErrFileNotFound is what a ContentsReader returns when the path does not exist at that commit.
+// Distinguished from a transport failure because the two mean opposite things: a missing config
+// is an un-onboarded repo, a failed read is a retry.
+var ErrFileNotFound = errors.New("file not found at commit")
+
+func refName(ref string) string {
+	if ref == "" {
+		return "the default branch"
+	}
+	return ref
+}
+
+func short(sha string) string {
+	if len(sha) > 12 {
+		return sha[:12]
+	}
+	return sha
 }
 
 // LoadAtSHA reads config at an exact commit already known to be the trusted ref's tip at some
@@ -79,7 +119,14 @@ func (l *Loader) LoadFromTrustedRef(ctx context.Context, owner, repo string) (cf
 // LoadFromTrustedRef, which reads the *current* tip. Config is fail-closed on change, so a
 // workspace deauthorized between plan and merge must not apply. See apply.Verify.
 func (l *Loader) LoadAtSHA(ctx context.Context, owner, repo, sha string) (*Config, error) {
-	return nil, errNotImplemented
+	raw, err := l.Contents.ReadFileAtSHA(ctx, owner, repo, Filename, sha)
+	if err != nil {
+		if errors.Is(err, ErrFileNotFound) {
+			return nil, ErrNoConfig
+		}
+		return nil, fmt.Errorf("reading %s at %s: %w", Filename, short(sha), err)
+	}
+	return ParseAndValidate(raw)
 }
 
 // ErrNoConfig means the repo has no config on its trusted ref — not an error, just an
@@ -88,9 +135,39 @@ var ErrNoConfig = errors.New("repository has no " + Filename + " on its trusted 
 
 // Parse decodes YAML with strict field matching, so a typo in a security-relevant key
 // ("impersonat:") fails loudly instead of silently defaulting.
+//
+// Strictness is the point. A misspelled `impersonate` would otherwise leave the field empty and
+// the workspace would look configured; a misspelled `require_protected_base` would silently mean
+// false. Both fail closed only if the decoder refuses unknown keys.
 func Parse(raw []byte) (*Config, error) {
-	// dec := yaml.NewDecoder(bytes.NewReader(raw)); dec.KnownFields(true)
-	return nil, errNotImplemented
+	dec := yaml.NewDecoder(bytes.NewReader(raw))
+	dec.KnownFields(true)
+
+	var c Config
+	if err := dec.Decode(&c); err != nil {
+		return nil, fmt.Errorf("%s: %w", Filename, err)
+	}
+	// A second document would be ambiguous about which one governs.
+	var extra yaml.Node
+	if err := dec.Decode(&extra); err == nil {
+		return nil, fmt.Errorf("%s: expected a single YAML document", Filename)
+	}
+	return &c, nil
+}
+
+// ParseAndValidate is Parse + Normalize + Validate, which is the only sequence a caller should
+// ever want: an un-normalized config validates against unset defaults, and an unvalidated one is
+// a mapping nobody checked.
+func ParseAndValidate(raw []byte) (*Config, error) {
+	c, err := Parse(raw)
+	if err != nil {
+		return nil, err
+	}
+	c.Normalize()
+	if err := c.Validate(); err != nil {
+		return nil, err
+	}
+	return c, nil
 }
 
 // Normalize applies Defaults to every workspace field left unset, and fills built-in defaults
@@ -98,10 +175,10 @@ func Parse(raw []byte) (*Config, error) {
 func (c *Config) Normalize() {
 	d := c.Defaults
 	if d.PlanTimeout == 0 {
-		d.PlanTimeout = 20 * time.Minute
+		d.PlanTimeout = Duration(20 * time.Minute)
 	}
 	if d.ApplyTimeout == 0 {
-		d.ApplyTimeout = 45 * time.Minute
+		d.ApplyTimeout = Duration(45 * time.Minute)
 	}
 	if d.SummaryDetail == "" {
 		d.SummaryDetail = SummaryAddresses
@@ -131,7 +208,7 @@ func (c *Config) Normalize() {
 			w.Apply.OnStale = StaleFail
 		}
 		if w.Apply.ApprovalTimeout == 0 {
-			w.Apply.ApprovalTimeout = 24 * time.Hour
+			w.Apply.ApprovalTimeout = Duration(24 * time.Hour)
 		}
 	}
 }
@@ -198,8 +275,17 @@ func (c *Config) Validate() error {
 		}
 		// TerraformVersion must correspond to a runner image tag we publish; downloading a
 		// version at runtime would need egress we deliberately do not have. See DESIGN.md §11.
-		if w.TerraformVersion == "" {
+		//
+		// And it must be an exact version, not a range. A saved plan is version-specific: the
+		// apply has to assert it is running the same Terraform the plan was built with, and
+		// "~> 1.9" makes that assertion unstateable. docs/CONFIG.md says exact; this enforces it.
+		switch {
+		case w.TerraformVersion == "":
 			errs = append(errs, fmt.Errorf("workspaces[%q].terraform_version: required", w.Name))
+		case !exactVersionRE.MatchString(w.TerraformVersion):
+			errs = append(errs, fmt.Errorf(
+				"workspaces[%q].terraform_version: %q is not an exact version; ranges cannot be pinned to a runner image or asserted at apply time (want e.g. 1.9.8)",
+				w.Name, w.TerraformVersion))
 		}
 	}
 
@@ -210,10 +296,54 @@ func (c *Config) Validate() error {
 	return errors.Join(errs...)
 }
 
-func (c *Config) validateNoOverlap() []error { return nil }
+func (c *Config) validateNoOverlap() []error {
+	var errs []error
+	for i, a := range c.Workspaces {
+		for _, b := range c.Workspaces[i+1:] {
+			if a.Branch == b.Branch && dirsOverlap(a.Dir, b.Dir) {
+				errs = append(errs, fmt.Errorf(
+					"workspaces[%q] and workspaces[%q]: both on branch %q with overlapping dirs %q and %q",
+					a.Name, b.Name, a.Branch, a.Dir, b.Dir))
+			}
+		}
+	}
+	return errs
+}
+
+// dirsOverlap compares on a path boundary, so "envs/prod" does not overlap "envs/production".
+func dirsOverlap(a, b string) bool {
+	a, b = path.Clean(a), path.Clean(b)
+	return a == b || strings.HasPrefix(a, b+"/") || strings.HasPrefix(b, a+"/")
+}
 
 // validateRepoPath rejects absolute paths, "..", and anything that would resolve outside the
 // repository root.
-func validateRepoPath(p string) error { return errNotImplemented }
+//
+// Checked on the cleaned path rather than the raw string: "envs/../../etc" contains no leading
+// ".." but still escapes, and rejecting only the literal prefix would miss it.
+func validateRepoPath(p string) error {
+	if p == "" {
+		return errors.New("required")
+	}
+	if strings.HasPrefix(p, "/") {
+		return fmt.Errorf("must be repo-relative, got %q", p)
+	}
+	if strings.ContainsRune(p, 0) {
+		return fmt.Errorf("contains a NUL byte")
+	}
+	clean := path.Clean(p)
+	if clean == ".." || strings.HasPrefix(clean, "../") {
+		return fmt.Errorf("escapes the repository root: %q", p)
+	}
+	return nil
+}
 
-func isServiceAccountEmail(s string) bool { return false }
+// saRE matches a GCP service-account email. Deliberately strict: this value names a credential
+// the runner is about to assume, so "close enough" is the wrong bar. Anything that is not
+// obviously one identity should fail validation rather than be passed to gcloud.
+// exactVersionRE requires major.minor.patch and nothing else — no ranges, no operators.
+var exactVersionRE = regexp.MustCompile(`^\d+\.\d+\.\d+$`)
+
+var saRE = regexp.MustCompile(`^[a-z]([-a-z0-9]{4,28}[a-z0-9])@[a-z][-a-z0-9]{4,28}[a-z0-9]\.iam\.gserviceaccount\.com$`)
+
+func isServiceAccountEmail(s string) bool { return saRE.MatchString(s) }
