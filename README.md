@@ -4,12 +4,9 @@ A GitHub App that plans Terraform on pull requests and applies **the reviewed pl
 merge — with the planner and the applier as two Cloud Run services that cannot do each
 other's job.
 
-> **Status: design only.** This repository currently contains the design and nothing that
-> compiles. `docs/DESIGN.md` is the artifact — the architecture, the threat model, the failure
-> modes and the open questions. `docs/CONFIG.md` specifies the per-repo config file, and
-> `.terraform-on-github.example.yaml` is a worked example of it.
->
-> The layout below is the intended shape, not a description of what is here.
+> **Status: scaffold.** `docs/DESIGN.md` is the real artifact. The Go tree and `deploy/` are a
+> scaffold: types, signatures, IAM wiring and the decisions written down where they belong.
+> Handlers return `errNotImplemented`.
 
 ## The shape
 
@@ -64,20 +61,16 @@ Full table: [DESIGN.md §7](docs/DESIGN.md#7-the-iam-boundary).
 docs/DESIGN.md            architecture, threat model, failure modes, open questions
 docs/CONFIG.md            .terraform-on-github.yaml schema
 .terraform-on-github.example.yaml
-```
 
-The code is not here yet. When it arrives it is intended to look like this:
-
-```
 cmd/plan-service/         webhook receiver + plan worker  (read-only tier)
 cmd/apply-service/        apply worker + /reconcile       (write tier)
 
 internal/config/          config schema, load-from-trusted-ref, validation
 internal/scope/           base branch + changed files → workspaces
 internal/ghapp/           App auth, down-scoped tokens, webhooks, checks, deployments
-internal/store/           artifacts, key layout, run index, sign/verify
+internal/store/           GCS artifacts, key layout, GCS-CAS run index, KMS sign/verify
 internal/tf/              Terraform CLI wrapper, checkout, provider mirror config
-internal/plan/            plan orchestration, summary rendering
+internal/plan/            plan orchestration, summary rendering, plan equivalence
 internal/apply/           apply orchestration, merge-time verification
 
 deploy/                   Terraform for the app's own GCP infra (services, IAM, buckets)
