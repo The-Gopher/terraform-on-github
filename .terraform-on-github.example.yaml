@@ -1,0 +1,76 @@
+# Example .terraform-on-github.yaml — drop at the root of a Terraform repo.
+# Schema reference: docs/CONFIG.md
+#
+# This file is read from ONE TRUSTED REF, declared app-side in deploy/ — never from the PR head,
+# and never from the PR's base branch.
+#
+# Why not the base: "base branch" only means "reviewed" when the base is protected. In a
+# feature -> integration -> prod flow, `integration` is writable by developers on purpose, so a
+# developer could merge a workspace entry naming a production apply identity and have the next PR
+# against `integration` apply with it. See docs/DESIGN.md 3.1.
+#
+# Editing this file in a PR does not change how that PR is planned; it takes effect once merged to
+# the trusted ref.
+
+version: 1
+
+defaults:
+  terraform_version: "1.9.8"
+  plan_timeout: 20m
+  apply_timeout: 45m
+  # addresses = resource address + action only (safe default; plans embed state secrets)
+  # full      = inline diff in the check summary
+  summary_detail: addresses
+
+# Allowlist for module `source` values, enforced before `terraform init` runs.
+# Omit or leave empty to permit only local paths (./ and ../).
+module_sources:
+  - "git::ssh://git@github.com/acme/terraform-modules//*?ref=v*"
+  - "registry.terraform.io/acme/*"
+
+workspaces:
+  - name: prod-networking
+    branch: main
+    dir: envs/prod/networking
+    watch:
+      - "modules/vpc/**"
+    backend:
+      bucket: acme-tfstate-prod
+      prefix: prod/networking
+    impersonate:
+      plan: tf-prod-networking-plan@acme-tf.iam.gserviceaccount.com
+      apply: tf-prod-networking-apply@acme-tf.iam.gserviceaccount.com
+    apply:
+      environment: prod-networking   # GitHub Environment; protection rules live in GitHub
+      on_stale: fail
+      require_protected_base: true   # assert `main` really does require reviews
+
+  # Developers merge into `integration` freely. That is safe only because they cannot edit this
+  # file — it lives on the trusted ref — so the most they can reach is this identity.
+  - name: integration
+    branch: integration
+    dir: envs/integration
+    watch:
+      - "modules/**"
+    backend:
+      bucket: acme-tfstate-integration
+      prefix: integration
+    summary_detail: full
+    impersonate:
+      plan: tf-integration-plan@acme-tf.iam.gserviceaccount.com
+      apply: tf-integration-apply@acme-tf.iam.gserviceaccount.com
+    apply:
+      environment: integration       # no required reviewers; that is the point of the stage
+
+  # Plan-only: PRs targeting release/* get a plan, never an apply.
+  - name: prod-networking-next
+    branch: "release/*"
+    dir: envs/prod/networking
+    backend:
+      bucket: acme-tfstate-prod
+      prefix: prod/networking
+    impersonate:
+      plan: tf-prod-networking-plan@acme-tf.iam.gserviceaccount.com
+      apply: tf-prod-networking-apply@acme-tf.iam.gserviceaccount.com
+    apply:
+      enabled: false

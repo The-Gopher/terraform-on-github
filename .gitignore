@@ -1,0 +1,6 @@
+/deploy/.terraform/
+/deploy/.terraform.lock.hcl
+/deploy/terraform.tfvars
+/deploy/*.tfstate*
+/bin/
+/.playwright-mcp/
