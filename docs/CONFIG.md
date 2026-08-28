@@ -25,11 +25,11 @@ The repo's declaration of which branches control which Terraform.
 | Key | Type | Default | Notes |
 |---|---|---|---|
 | `terraform_version` | string | required | Exact version, no ranges. Must be a version baked into a published runner image. |
-| `plan_timeout` | duration | `20m` | Bounded by the Cloud Tasks 30m dispatch deadline. |
+| `plan_timeout` | duration | `20m` | Any form `time.ParseDuration` accepts (`30s`, `20m`, `1h30m`). Bounded by the Cloud Tasks 30m dispatch deadline. |
 | `apply_timeout` | duration | `45m` | |
 | `summary_detail` | enum | `addresses` | `addresses` = address + action only. `full` = inline diff. See DESIGN §8. |
 | `var_files` | []string | `[]` | Relative to `dir`. |
-| `plan_args` | []string | `[]` | Extra `terraform plan` flags. `-lock`, `-out` and `-input` are reserved and rejected. |
+| `plan_args` | []string | `[]` | Extra `terraform plan` flags. `-lock`, `-out`, `-input`, `-state`, `-var-file` and `-chdir` are reserved and rejected. |
 
 ## `workspaces[]`
 
@@ -41,15 +41,15 @@ The repo's declaration of which branches control which Terraform.
 | `watch` | []string | no | Extra globs whose change invalidates this workspace (shared modules). |
 | `terraform_workspace` | string | no | Escape hatch for `terraform workspace select`. Prefer separate backends — DESIGN §13.1. |
 | `backend` | object | yes | `bucket`, `prefix`. GCS backend only in v1. |
-| `impersonate.plan` | string | yes¹ | Read-only SA. `tf-plan@` must hold `tokenCreator` on it. |
-| `impersonate.apply` | string | yes¹ | Writer SA. `tf-apply@` must hold `tokenCreator` on it. |
+| `impersonate.plan` | string | yes | Read-only SA. `tf-plan@` must hold `tokenCreator` on it. |
+| `impersonate.apply` | string | yes | Writer SA. `tf-apply@` must hold `tokenCreator` on it. |
 | `apply` | object | no | See below. |
 
-¹ Required for the two-service deployment, where the per-workspace identity *is* the IAM
-boundary. The local scripts accept an empty value and run with the operator's own credentials —
-the boundary is gone either way ([docs/LOCAL.md §4](./LOCAL.md#the-iam-boundary--this-is-the-big-one)),
-so there is nothing to be gained by making them lie about it. A non-empty value is still
-validated as a service-account email and still impersonated.
+Both identities are required, and validated as service-account emails, even for the local
+commands — the config describes what the workspace *needs*, not what today's runner happens to
+have. `tfog-plan`/`tfog-apply` impersonate them by default; `--no-impersonate` declines to, which
+is the operator saying they already hold the right identity. See
+[docs/LOCAL.md](./LOCAL.md#the-iam-boundary--this-is-the-big-one).
 
 ## `workspaces[].apply`
 
@@ -74,6 +74,8 @@ Rejected at load time, surfaced as one failing check on every PR against the bra
 - two workspaces on the same `branch` with overlapping `dir`
 - an `impersonate` value that is not a valid service-account email
 - `plan_args` containing `-lock`, `-out`, `-input`, `-state` or `-var-file`
+- a `terraform_version` that is not exact (`~> 1.9` is rejected; a range cannot be pinned to a
+  runner image, and cannot be asserted at apply time against the plan that was reviewed)
 - a `terraform_version` with no matching runner image
 - a module `source` in the tree matching neither `module_sources` nor a local path
 
