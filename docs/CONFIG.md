@@ -6,6 +6,8 @@ The repo's declaration of which branches control which Terraform.
 > declared outside the repo — not the PR head, and *not the PR's base branch*. A PR that edits
 > this file does not change how it is itself planned; the edit takes effect once it reaches the
 > trusted ref. See [DESIGN.md §3.1](./DESIGN.md#31-the-config-is-read-from-one-trusted-ref-not-from-the-prs-base).
+> Locally, that ref is `tfog-plan --trusted-ref` (default: the repo's default branch) —
+> [docs/LOCAL.md](./LOCAL.md).
 
 ---
 
@@ -43,8 +45,11 @@ The repo's declaration of which branches control which Terraform.
 | `impersonate.apply` | string | yes | Writer SA. `tf-apply@` must hold `tokenCreator` on it. |
 | `apply` | object | no | See below. |
 
-Both identities are required, and validated as service-account emails. The config describes what
-the workspace *needs*, not what a particular runner happens to hold.
+Both identities are required, and validated as service-account emails, even for the local
+commands — the config describes what the workspace *needs*, not what today's runner happens to
+have. `tfog-plan`/`tfog-apply` impersonate them by default; `--no-impersonate` declines to, which
+is the operator saying they already hold the right identity. See
+[docs/LOCAL.md](./LOCAL.md#the-iam-boundary--this-is-the-big-one).
 
 ## `workspaces[].apply`
 
@@ -60,7 +65,8 @@ the workspace *needs*, not what a particular runner happens to hold.
 
 ## Validation rules
 
-Rejected at load time, surfaced as one failing check on every PR against the branch:
+Rejected at load time, surfaced as one failing check on every PR against the branch (locally:
+`tfog-plan` refuses to plan anything and prints the reason):
 
 - `version != 1`
 - duplicate `name`; `name` not matching `[a-z0-9-]{1,48}`

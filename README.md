@@ -4,14 +4,16 @@ A GitHub App that plans Terraform on pull requests and applies **the reviewed pl
 merge — with the planner and the applier as two Cloud Run services that cannot do each
 other's job.
 
-> **Status.** `docs/DESIGN.md` is the design. The packages both tiers share —
-> `internal/config`, `internal/scope`, `internal/tf`, `internal/plan`, `internal/store` — are
-> implemented and tested: the trusted-ref config load, workspace scoping, checkout, the
-> Terraform wrapper, the module-source allowlist, plan keying and summary rendering.
+> **Status.** `docs/DESIGN.md` is the design. The **first iteration runs today** as two local
+> commands — `cmd/tfog-plan` and `cmd/tfog-apply` — which do the whole flow on one machine: plan
+> a PR, store the plan, post it; then verify the merge against that stored plan, apply it, post
+> the outcome. See [docs/LOCAL.md](docs/LOCAL.md).
 >
-> What is still a scaffold is the service half: App auth, GCS artifacts, the coordination
-> bucket, KMS signing, and the two workers in `cmd/*-service`, which return
-> `errNotImplemented`. Nothing runs end to end yet. `deploy/` is likewise ahead of the code.
+> They are built on the same `internal/` packages the services will use, so the shared half —
+> config loading, scoping, checkout, the Terraform wrapper, plan keying and rendering — is real
+> and tested. What is still a scaffold is the service half: App auth, GCS artifacts, the
+> coordination bucket, KMS signing, and the two workers in `cmd/*-service`, which return
+> `errNotImplemented`. `deploy/` is likewise ahead of the code.
 
 ## The shape
 
@@ -60,22 +62,47 @@ Full table: [DESIGN.md §7](docs/DESIGN.md#7-the-iam-boundary).
 - **[§8](docs/DESIGN.md#8-untrusted-code-is-the-real-threat)** — `terraform plan` runs
   untrusted code. Egress allowlist, provider mirror, module-source allowlist, fork gating.
 
+## Start here: the local commands
+
+```bash
+go build -o bin/ ./cmd/tfog-plan ./cmd/tfog-apply
+gh auth login && gcloud auth application-default login
+cd ~/src/acme-infra                  # a clone of the Terraform repo
+
+bin/tfog-plan 412                    # plan what PR #412 touches, store it, comment on the PR
+bin/tfog-apply 412 --dry-run         # after merge: verify everything, stop before applying
+bin/tfog-apply 412                   # type the workspace name to confirm
+```
+
+Same pipeline, one machine, no infrastructure. It keeps the parts that are hard to get right —
+config from a trusted ref, up-to-date-or-nothing, a write-once plan keyed by
+`(base_sha, head_sha)`, the tree test at merge, and applying *the stored plan file* rather than a
+fresh one — and drops the parts that are merely work. What that costs, in detail, is
+[§4 of docs/LOCAL.md](docs/LOCAL.md#4-what-is-gone-and-what-it-costs); the short version is that
+the IAM boundary is the thing you cannot have locally, and it is the reason the services exist.
+
 ## Layout
 
 ```
 docs/DESIGN.md            architecture, threat model, failure modes, open questions
+docs/LOCAL.md             the local scripts: what they preserve, what they drop
 docs/CONFIG.md            .terraform-on-github.yaml schema
 .terraform-on-github.example.yaml
 
+cmd/tfog-plan/            local: plan a PR, store, comment
+cmd/tfog-apply/           local: verify a merged PR, apply the stored plan, comment
 cmd/plan-service/         webhook receiver + plan worker  (read-only tier)
 cmd/apply-service/        apply worker + /reconcile       (write tier)
 
-internal/config/          config schema, load-from-trusted-ref, validation
+internal/cli/             shared argument, store and output plumbing for the two commands
+internal/config/          config schema, load-from-trusted-ref, strict decode, validation
 internal/scope/           base branch + changed files → workspaces
 internal/ghapp/           App auth, down-scoped tokens, webhooks, checks, deployments
-internal/store/           GCS artifacts, key layout, GCS-CAS run index, KMS sign/verify
+internal/ghcli/           GitHub via the `gh` CLI — what the local commands use instead
+internal/store/           key layout, Meta + digest, the local store, GCS/CAS/KMS scaffold
 internal/tf/              Terraform CLI wrapper, checkout, provider mirror config
 internal/plan/            plan orchestration, summary rendering, plan equivalence
+internal/prcomment/       PR comment bodies for the local commands
 internal/apply/           apply orchestration, merge-time verification
 
 deploy/                   Terraform for the app's own GCP infra (services, IAM, buckets)
