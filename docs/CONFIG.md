@@ -2,9 +2,12 @@
 
 The repo's declaration of which branches control which Terraform.
 
-> **Read from the base branch, always.** The app fetches this file at the tip of the PR's
-> base branch, never from the PR head. A PR that edits this file does not change how it is
-> itself planned — see [DESIGN.md §3.1](./DESIGN.md#31-the-config-is-read-from-one-trusted-ref-not-from-the-prs-base).
+> **Read from one trusted ref, always.** The app fetches this file at the tip of a single ref
+> declared outside the repo — not the PR head, and *not the PR's base branch*. A PR that edits
+> this file does not change how it is itself planned; the edit takes effect once it reaches the
+> trusted ref. See [DESIGN.md §3.1](./DESIGN.md#31-the-config-is-read-from-one-trusted-ref-not-from-the-prs-base).
+> Locally, that ref is `tfog-plan --trusted-ref` (default: the repo's default branch) —
+> [docs/LOCAL.md](./LOCAL.md).
 
 ---
 
@@ -38,9 +41,15 @@ The repo's declaration of which branches control which Terraform.
 | `watch` | []string | no | Extra globs whose change invalidates this workspace (shared modules). |
 | `terraform_workspace` | string | no | Escape hatch for `terraform workspace select`. Prefer separate backends — DESIGN §13.1. |
 | `backend` | object | yes | `bucket`, `prefix`. GCS backend only in v1. |
-| `impersonate.plan` | string | yes | Read-only SA. `tf-plan@` must hold `tokenCreator` on it. |
-| `impersonate.apply` | string | yes | Writer SA. `tf-apply@` must hold `tokenCreator` on it. |
+| `impersonate.plan` | string | yes¹ | Read-only SA. `tf-plan@` must hold `tokenCreator` on it. |
+| `impersonate.apply` | string | yes¹ | Writer SA. `tf-apply@` must hold `tokenCreator` on it. |
 | `apply` | object | no | See below. |
+
+¹ Required for the two-service deployment, where the per-workspace identity *is* the IAM
+boundary. The local scripts accept an empty value and run with the operator's own credentials —
+the boundary is gone either way ([docs/LOCAL.md §4](./LOCAL.md#the-iam-boundary--this-is-the-big-one)),
+so there is nothing to be gained by making them lie about it. A non-empty value is still
+validated as a service-account email and still impersonated.
 
 ## `workspaces[].apply`
 
@@ -56,7 +65,8 @@ The repo's declaration of which branches control which Terraform.
 
 ## Validation rules
 
-Rejected at load time, surfaced as one failing check on every PR against the branch:
+Rejected at load time, surfaced as one failing check on every PR against the branch (locally:
+`tfog-plan` refuses to plan anything and prints the reason):
 
 - `version != 1`
 - duplicate `name`; `name` not matching `[a-z0-9-]{1,48}`

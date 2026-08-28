@@ -4,9 +4,14 @@ A GitHub App that plans Terraform on pull requests and applies **the reviewed pl
 merge — with the planner and the applier as two Cloud Run services that cannot do each
 other's job.
 
-> **Status: sketch.** `docs/DESIGN.md` is the real artifact. The Go tree and `deploy/` are a
-> scaffold: types, signatures, IAM wiring and the decisions written down where they belong.
-> Handlers return `errNotImplemented`.
+> **Status.** `docs/DESIGN.md` is the design. The **first iteration runs today** as two local
+> scripts — `scripts/tfog-plan` and `scripts/tfog-apply` — which do the whole flow on one
+> machine: plan a PR, store the plan, post it; then verify the merge against that stored plan,
+> apply it, post the outcome. See [docs/LOCAL.md](docs/LOCAL.md).
+>
+> The Go tree and `deploy/` are still a scaffold for the two-service version: types, signatures,
+> IAM wiring, and the decisions written down where they belong. Handlers return
+> `errNotImplemented`.
 
 ## The shape
 
@@ -55,12 +60,36 @@ Full table: [DESIGN.md §7](docs/DESIGN.md#7-the-iam-boundary).
 - **[§8](docs/DESIGN.md#8-untrusted-code-is-the-real-threat)** — `terraform plan` runs
   untrusted code. Egress allowlist, provider mirror, module-source allowlist, fork gating.
 
+## Start here: the local scripts
+
+```bash
+gh auth login && gcloud auth application-default login
+cd ~/src/acme-infra                     # a clone of the Terraform repo
+
+scripts/tfog-plan 412                   # plan what PR #412 touches, store it, comment on the PR
+scripts/tfog-apply 412 --dry-run        # after merge: verify everything, stop before applying
+scripts/tfog-apply 412                  # type the workspace name to confirm
+```
+
+Same pipeline, one machine, no infrastructure. It keeps the parts that are hard to get right —
+config from a trusted ref, up-to-date-or-nothing, a write-once plan keyed by
+`(base_sha, head_sha)`, the tree test at merge, and applying *the stored plan file* rather than a
+fresh one — and drops the parts that are merely work. What that costs, in detail, is
+[§4 of docs/LOCAL.md](docs/LOCAL.md#4-what-is-gone-and-what-it-costs); the short version is that
+the IAM boundary is the thing you cannot have locally, and it is the reason the services exist.
+
 ## Layout
 
 ```
 docs/DESIGN.md            architecture, threat model, failure modes, open questions
+docs/LOCAL.md             the local scripts: what they preserve, what they drop
 docs/CONFIG.md            .terraform-on-github.yaml schema
 .terraform-on-github.example.yaml
+
+scripts/tfog-plan         local: plan a PR, store, comment
+scripts/tfog-apply        local: verify a merged PR, apply the stored plan, comment
+scripts/tfog/             config, GitHub, store, terraform and rendering for both
+scripts/tests/            tests for the local scripts (python3 scripts/tests/test_tfog.py)
 
 cmd/plan-service/         webhook receiver + plan worker  (read-only tier)
 cmd/apply-service/        apply worker + /reconcile       (write tier)

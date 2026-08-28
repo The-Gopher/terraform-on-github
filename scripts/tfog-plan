@@ -1,0 +1,332 @@
+#!/usr/bin/env python3
+"""tfog-plan — plan a pull request's Terraform, store the plan, post it to the PR.
+
+    scripts/tfog-plan 412
+    scripts/tfog-plan 412 --workspace prod-networking --trusted-ref main
+
+The local, single-machine version of the plan service in docs/DESIGN.md. It keeps the four
+properties that make the design worth having and drops the infrastructure around them:
+
+  1. Config comes from ONE TRUSTED REF (--trusted-ref, default the repo's default branch),
+     never the PR head and never the PR's base branch.               DESIGN 3.1
+  2. The PR head must already contain its base, or nothing is planned.  DESIGN 4.1
+  3. The plan is keyed by (base_sha, head_sha) and written once.        DESIGN 5, 5.2
+  4. The tree that was planned is recorded, so the apply can prove it
+     applied the reviewed content.                                     DESIGN 6.2
+
+What is gone: the IAM boundary between planner and applier (one operator runs both), the KMS
+signature, the coordination bucket, the egress sandbox, and check runs — the output is a PR
+comment. See docs/LOCAL.md.
+
+Exit status: 0 planned (with or without changes — DESIGN 4.3), 1 error, 3 nothing in scope,
+4 the branch needs updating.
+"""
+
+from __future__ import annotations
+
+import argparse
+import os
+import sys
+import time
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from tfog import cfg, ghub, render, store, terra  # noqa: E402
+
+EXIT_OK, EXIT_ERROR, EXIT_NOTHING_IN_SCOPE, EXIT_BRANCH_BEHIND = 0, 1, 3, 4
+
+
+class WorkspaceError(Exception):
+    """One workspace could not be planned. The others still are — a repo with five workspaces
+    should not lose four plans because one root module is broken."""
+
+
+def log(msg: str = "") -> None:
+    print(msg, file=sys.stderr, flush=True)
+
+
+def parse_args(argv=None):
+    p = argparse.ArgumentParser(prog="tfog-plan", description="Plan a PR's Terraform and post it to the PR.")
+    p.add_argument("pr", type=int, help="pull request number")
+    p.add_argument("--repo", help="owner/repo (default: the repo in the current directory)")
+    p.add_argument(
+        "--trusted-ref",
+        help="ref to read %s from (default: the repo's default branch). Never the PR head." % cfg.FILENAME,
+    )
+    p.add_argument("--workspace", action="append", default=[], help="limit to this workspace (repeatable)")
+    p.add_argument("--store", help=f"plan store root (default: $TFOG_STORE or {store.DEFAULT_ROOT})")
+    p.add_argument("--no-comment", action="store_true", help="print the summary; do not post to the PR")
+    p.add_argument(
+        "--force", action="store_true", help="discard and replace an existing plan for this exact (base, head) pair"
+    )
+    p.add_argument(
+        "--allow-version-mismatch",
+        action="store_true",
+        help="plan with the local terraform even if it is not the version the config pins",
+    )
+    p.add_argument("--no-impersonate", action="store_true", help="ignore impersonate.plan; use ambient credentials")
+    return p.parse_args(argv)
+
+
+def main(argv=None) -> int:
+    args = parse_args(argv)
+    ghub.require_gh()
+    terra.require_tools("git")
+
+    owner, repo = _resolve_repo(args.repo)
+    st = store.Store(args.store)
+
+    pr = ghub.pull_request(owner, repo, args.pr)
+    base_ref = pr["base"]["ref"]
+    head_sha = pr["head"]["sha"]
+    log(f"PR #{args.pr}: {pr['head']['label']} → {base_ref}  head {head_sha[:12]}")
+
+    # -- 1. config, from the trusted ref -----------------------------------
+    trusted_ref = args.trusted_ref or os.environ.get("TFOG_TRUSTED_REF") or ghub.default_branch(owner, repo)
+    text, config_ref_sha = ghub.file_at_ref(owner, repo, cfg.FILENAME, trusted_ref)
+    config = cfg.load(text)
+    log(f"config: {cfg.FILENAME} @ {trusted_ref} ({config_ref_sha[:12]}), {len(config.workspaces)} workspace(s)")
+
+    # -- 2. is the head already the merge result? --------------------------
+    #
+    # Before anything expensive, and before any credential is used: if the head does not
+    # contain its base, every plan below would describe a tree that will never exist.
+    comparison = ghub.compare(owner, repo, base_ref, head_sha)
+    base_sha = comparison["merge_base_commit"]["sha"]
+    try:
+        terra.divergence(comparison)
+    except terra.BranchBehindBase as e:
+        detail = (
+            f"{e}\n\nUpdate the branch and push — a plan of a head that is missing commits from "
+            f"`{base_ref}` describes a tree that will never exist, so there is nothing safe to "
+            "review. This is not retryable without a push (docs/DESIGN.md 4.1)."
+        )
+        log(f"blocked: {e}")
+        if not args.no_comment:
+            ghub.upsert_comment(
+                owner, repo, args.pr, ghub.marker("plan", "_blocked"),
+                render.blocked_body(marker=ghub.marker("plan", "_blocked"), title="Terraform plan skipped", detail=detail),
+            )
+        return EXIT_BRANCH_BEHIND
+
+    # -- 3. which workspaces does this diff touch? ------------------------
+    changed = [f["filename"] for f in comparison.get("files") or []]
+    truncated = comparison.get("files_truncated")
+    if truncated:
+        log("warning: GitHub returned the maximum 300 changed files; scoping every candidate workspace")
+    scope = cfg.scope(config, base_ref, changed, all_candidates=bool(truncated))
+
+    selected = scope.in_scope
+    if args.workspace:
+        wanted = set(args.workspace)
+        unknown = wanted - {w.name for w in config.workspaces}
+        if unknown:
+            log(f"error: no such workspace(s): {', '.join(sorted(unknown))}")
+            return EXIT_ERROR
+        # An explicit --workspace still has to be bound to this base branch. The branch binding
+        # is what authorizes the identity; a flag must not be able to route around it.
+        candidates = {w.name for w in scope.candidates}
+        off_branch = wanted - candidates
+        if off_branch:
+            log(f"error: {', '.join(sorted(off_branch))} is not bound to base branch {base_ref!r}")
+            return EXIT_ERROR
+        selected = [w for w in scope.candidates if w.name in wanted]
+
+    if scope.config_changed and not args.no_comment:
+        ghub.upsert_comment(
+            owner, repo, args.pr, ghub.marker("plan", "_config"),
+            render.blocked_body(
+                marker=ghub.marker("plan", "_config"),
+                title=f"This PR edits `{cfg.FILENAME}`",
+                detail=(
+                    f"The config used for these plans was read from **`{trusted_ref}`** "
+                    f"(`{config_ref_sha[:8]}`), not from this branch. Your edit changes nothing "
+                    "about how this PR is planned; it takes effect once it reaches the trusted "
+                    "ref (docs/DESIGN.md 3.1)."
+                ),
+            ),
+        )
+
+    if not selected:
+        names = ", ".join(w.name for w in scope.candidates) or "none"
+        log(f"nothing in scope. Workspaces bound to {base_ref!r}: {names}")
+        log(f"changed paths ({len(changed)}): {', '.join(changed[:10])}{' …' if len(changed) > 10 else ''}")
+        return EXIT_NOTHING_IN_SCOPE
+
+    log(f"in scope: {', '.join(w.name for w in selected)}")
+
+    # -- 4. plan each workspace -------------------------------------------
+    source_repo = terra.local_repo_root()
+    failures = []
+    for ws in selected:
+        try:
+            plan_one(
+                args, st, config, ws,
+                owner=owner, repo=repo, pr_number=args.pr, base_ref=base_ref,
+                base_sha=base_sha, head_sha=head_sha,
+                trusted_ref=trusted_ref, config_ref_sha=config_ref_sha,
+                source_repo=source_repo,
+            )
+        except Exception as e:  # noqa: BLE001 — one workspace failing must not skip the rest
+            failures.append((ws.name, e))
+            log(f"\n{ws.name}: FAILED — {e}")
+            if not args.no_comment:
+                ghub.upsert_comment(
+                    owner, repo, args.pr, ghub.marker("plan", ws.name),
+                    render.blocked_body(
+                        marker=ghub.marker("plan", ws.name),
+                        title=f"`terraform plan` failed — **{ws.name}**",
+                        detail=f"```\n{str(e).strip()[:4000]}\n```\n\n"
+                               f"<sub>head `{head_sha[:12]}` · `{ws.dir}`</sub>",
+                    ),
+                )
+
+    if failures:
+        log("\n" + f"{len(failures)} of {len(selected)} workspace(s) failed to plan:")
+        for name, e in failures:
+            log(f"  {name}: {str(e).splitlines()[0]}")
+        return EXIT_ERROR
+    return EXIT_OK
+
+
+def plan_one(args, st, config, ws, *, owner, repo, pr_number, base_ref, base_sha, head_sha,
+             trusted_ref, config_ref_sha, source_repo) -> None:
+    key = store.PlanKey(owner, repo, ws.name, base_sha, head_sha)
+    log(f"\n=== {ws.name} · {ws.dir} · key {key.prefix()}")
+
+    if st.complete(key):
+        if not args.force:
+            # This is the (base_sha, head_sha) cache from DESIGN 4.2, and the write-once
+            # property from 5.2: the same inputs already have a reviewed plan, and silently
+            # replacing its bytes is exactly what the design forbids.
+            log("already planned; reusing the stored plan (pass --force to discard and re-plan)")
+            meta = st.read_meta(key)
+            _publish(args, st, ws, key, meta, owner, repo, pr_number)
+            return
+        log("--force: discarding the stored plan for this pair")
+        st.purge(key)
+
+    binary = terra.terraform_bin()
+    local_version = terra.terraform_version(binary)
+    if local_version != ws.terraform_version:
+        msg = (
+            f"local terraform is {local_version}, config pins {ws.terraform_version}. A saved plan "
+            f"is version-specific, and tfog-apply requires the same version it was planned with."
+        )
+        if not args.allow_version_mismatch:
+            raise WorkspaceError(
+                f"{msg}\nEither install {ws.terraform_version}, point $TFOG_TERRAFORM_BIN at it, or "
+                "pass --allow-version-mismatch to plan with what you have."
+            )
+        log(f"warning: {msg} (--allow-version-mismatch)")
+
+    impersonate = "" if args.no_impersonate else ws.impersonate.plan
+    log(f"identity: {impersonate or 'ambient credentials (no impersonation)'}")
+
+    started = time.monotonic()
+    with terra.checkout(
+        head_sha, ghub.clone_url(owner, repo), source_repo,
+        fetch_refs=(f"refs/pull/{pr_number}/head", base_ref),
+    ) as co:
+        log(f"checkout {co.commit_sha[:12]} · tree {co.tree_sha[:12]}")
+        workdir = co.root / ws.dir
+        if not workdir.is_dir():
+            raise WorkspaceError(f"{ws.dir} does not exist at {head_sha[:12]}")
+
+        # Before init, because init is what fetches module code and can run it.
+        sources = cfg.collect_module_sources(co.root, workdir)
+        if os.environ.get("TFOG_ALLOW_ANY_MODULE_SOURCE") == "1":
+            log(f"warning: TFOG_ALLOW_ANY_MODULE_SOURCE=1 — {len(sources)} module source(s) unchecked")
+        else:
+            cfg.check_module_sources(sources, config.module_sources)
+            log(f"module sources: {len(sources)} checked against the allowlist")
+
+        runner = terra.Runner(workdir=workdir, binary=binary, impersonate=impersonate)
+        runner.init(ws.backend, ws.terraform_workspace)
+        lock_digest = terra.provider_lock_digest(workdir)
+
+        plan_file = co.root / f"tfplan-{ws.name}"
+        changed = runner.plan(plan_file, ws.var_files, ws.plan_args, timeout=ws.plan_timeout)
+        plan_json = runner.show_json(plan_file)
+        plan_text = runner.show_text(plan_file)
+        duration = time.monotonic() - started
+
+        tally = render.counts(plan_json)
+        # -detailed-exitcode and plan.json must agree. If they do not, one of them is being
+        # misread, and the headline counts are the number reviewers trust most.
+        if changed != render.has_changes(tally):
+            raise WorkspaceError(
+                f"-detailed-exitcode says has_changes={changed} but plan.json tallies {tally}; "
+                "refusing to publish a summary that may misstate the change"
+            )
+
+        # meta.json last: its presence is what marks the plan complete.
+        st.create_from_file(key, store.ARTIFACT_PLAN, plan_file)
+        st.create(key, store.ARTIFACT_PLAN_JSON, plan_json)
+        st.create(key, store.ARTIFACT_PLAN_TEXT, plan_text.encode())
+        meta = st.write_meta(key, store.new_meta(
+            key,
+            pr=pr_number,
+            planned_tree_sha=co.tree_sha,
+            config_ref=trusted_ref,
+            config_ref_sha=config_ref_sha,
+            terraform_version=local_version,
+            provider_lock_sha256=lock_digest,
+            plan_sha256=store.sha256_file(st.path(key, store.ARTIFACT_PLAN)),
+            has_changes=changed,
+            counts=tally,
+            duration_seconds=duration,
+            base_ref=base_ref,
+            workspace_dir=ws.dir,
+            planned_by=ghub.viewer_login(),
+        ))
+        st.write_state(key, store.STATE_PLANNED, pr=pr_number)
+
+    log(f"stored: {st.key_dir(key)}")
+    log(f"{ws.name}: {render.headline(tally) if changed else 'no changes'}")
+    _publish(args, st, ws, key, meta, owner, repo, pr_number)
+
+    # Older plans for this PR are left in place deliberately, the way DESIGN 5.4 keeps a
+    # superseded run rather than deleting it: the store stays an explicable history. What must
+    # not survive is a *reviewable* pointer to a stale plan, and the sticky comment is that
+    # pointer — updating it in place is what supersedes the previous head.
+
+
+def _publish(args, st, ws, key, meta, owner, repo, pr_number) -> None:
+    plan_json = st.path(key, store.ARTIFACT_PLAN_JSON).read_bytes()
+    plan_text = st.path(key, store.ARTIFACT_PLAN_TEXT).read_text()
+    tally = meta["resource_change_counts"]
+    body = render.plan_body(
+        workspace=ws, meta=meta, plan_json=plan_json, plan_text=plan_text,
+        plan_path=st.key_dir(key), tally=tally, marker=ghub.marker("plan", ws.name),
+    )
+    if args.no_comment:
+        log("\n--- comment body (not posted) ---")
+        print(body)
+        return
+    c = ghub.upsert_comment(owner, repo, pr_number, ghub.marker("plan", ws.name), body)
+    log(f"posted: {c.get('html_url')}")
+
+
+def _resolve_repo(flag):
+    if flag:
+        if "/" not in flag:
+            raise SystemExit("--repo must be owner/repo")
+        owner, _, repo = flag.partition("/")
+        return owner, repo
+    try:
+        return ghub.repo_from_cwd()
+    except ghub.GHError as e:
+        raise SystemExit(f"could not determine the repository; pass --repo owner/repo\n{e}") from e
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except KeyboardInterrupt:
+        log("\ninterrupted")
+        sys.exit(130)
+    except (cfg.ConfigError, cfg.ModuleSourceDenied, ghub.GHError, store.StoreError, terra.TFError) as err:
+        log(f"error: {err}")
+        sys.exit(EXIT_ERROR)
