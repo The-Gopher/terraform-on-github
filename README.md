@@ -8,6 +8,9 @@ other's job.
 > compiles. `docs/DESIGN.md` is the artifact — the architecture, the threat model, the failure
 > modes and the open questions. `docs/CONFIG.md` specifies the per-repo config file, and
 > `.terraform-on-github.example.yaml` is a worked example of it.
+> `docs/ROADMAP.md` is the proposed path: **v0.1** is five CLI verbs that answer the design's
+> five real questions by hand, against live repos; **v0.2** is the same verbs called by webhooks
+> and a scheduler instead of by a person.
 >
 > The layout below is the intended shape, not a description of what is here.
 
@@ -63,6 +66,7 @@ Full table: [DESIGN.md §7](docs/DESIGN.md#7-the-iam-boundary).
 ```
 docs/DESIGN.md            architecture, threat model, failure modes, open questions
 docs/CONFIG.md            .terraform-on-github.yaml schema
+docs/ROADMAP.md           v0.1 by hand, v0.2 automatic — milestones and what gates what
 .terraform-on-github.example.yaml
 ```
 
