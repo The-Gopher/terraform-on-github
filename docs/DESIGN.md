@@ -20,15 +20,22 @@ infrastructure, one that can only write it.
 5. The service that plans **cannot** mutate infrastructure. The service that applies **cannot** be
    triggered by anything except a verified, merged PR with a signed plan.
 6. A compromised plan service leaks read access to one workspace at a time, and nothing else.
+7. **Detect drift.** On a schedule, plan every configured workspace against its base branch
+   with no PR in flight. A non-empty plan means reality has diverged from the committed
+   state; report it as an issue. Reuses the plan worker and the read-only tier — drift
+   detection never gains the ability to correct what it finds.
+8. **GitHub is the entire interface.** Checks, PR comments and Deployments carry every
+   result, approval and audit trail the system produces. No web UI — no second place to
+   look, no separate session to authenticate, no state that outlives the pull request.
 
 ### Non-goals (v1)
 
-- Drift detection / scheduled plans. (Hooks in cleanly later: same plan worker, cron trigger.)
+- Automatic drift *remediation*. Drift is reported, never silently applied; closing it goes
+  through a PR like any other change.
 - Policy-as-code enforcement. `plan.json` is the natural input to conftest/OPA — see §12.
 - Non-GCP providers. v1 uses GCP service-account impersonation for target credentials.
   AWS/Azure would arrive via Workload Identity Federation, same shape.
 - State migration, import flows, `terraform destroy`.
-- A web UI. GitHub checks, PR comments and Deployments are the entire interface.
 
 ---
 
@@ -380,18 +387,28 @@ property. Drop it.
 
 ```
 gs://acme-tf-plans/
-  <owner>/<repo>/<workspace>/<base_sha>/<head_sha>/
+  pr/<owner>/<repo>/<workspace>/<base_sha>/<head_sha>/
       tfplan          # opaque binary — the thing that gets applied
       plan.json       # terraform show -json  (summary, equivalence, future policy checks)
       plan.txt        # terraform show        (human diff, behind a signed URL)
       meta.json       # provenance, signed
+
+  drift/<owner>/<repo>/<workspace>/<base_sha>/<scan_id>/
+      plan.json       # what diverged
+      plan.txt        # the body of the issue
+      meta.json       # provenance, signed — kind: "drift"
 ```
+
+Two key shapes, two top-level prefixes, and **no key is ever reachable under both** — see
+§5.6. A drift run writes no `tfplan`: nothing will apply it, and the file that would be
+applied is the one worth not having (§6.6).
 
 `meta.json`:
 
 ```json
 {
   "schema": 1,
+  "kind": "pr",                    // "pr" | "drift" — inside the signature
   "repo": "acme/infra",
   "pr": 412,
   "workspace": "prod-networking",
@@ -450,11 +467,15 @@ consistent list, which is what makes §5.5 work.
 
 ```
 gs://acme-tf-runs/
-  runs/<owner>/<repo>/<workspace>/<base_sha>/<head_sha>.json
+  runs/pr/<owner>/<repo>/<workspace>/<base_sha>/<head_sha>.json
+  runs/drift/<owner>/<repo>/<workspace>/<scan_id>.json
   pending-apply/<owner>/<repo>/<pr>/<workspace>/<base_sha>__<head_sha>
+  drift-open/<owner>/<repo>/<workspace>.json     # open issue number, first seen
   leases/<owner>_<repo>_<workspace>
   deliveries/<delivery-id>
 ```
+
+`pending-apply/` has no drift shape and never will — that absence is half of §6.6.
 
 **Why a second bucket rather than the plan bucket.** The plan service holds
 `objectCreator`-only on artifacts — no read, no overwrite, which is the whole of §5.2 — and
@@ -506,6 +527,54 @@ Supersede is multi-object and therefore not atomic, and does not need to be. It 
 cleanup: a partial pass leaves a stale marker, `/reconcile` hands it to `apply.Verify`, and
 verification rejects it. **The marker set is an optimization over re-verification, never a
 substitute for it** — which is the same principle as §6.1.
+
+### 5.6 Drift runs: keying without a head
+
+A scheduled scan (goal 7) has a base but no head: there is no PR, no proposed commit, no
+`head_sha` to key on. Three properties have to survive that.
+
+**A drift key cannot borrow the head slot.** The obvious encoding — a synthetic
+`(base_sha, base_sha)` pair — breaks on §5.2. Write-once means a name can be created exactly
+once, and `main` sits at one `base_sha` for as long as nobody merges: the 03:00 scan takes the
+key, and every scan after it until the next merge fails to upload. A scheme where the *second*
+run of a recurring job cannot store its output is not a keying scheme. The scan needs its own
+coordinate.
+
+**That coordinate is the scheduled time, not the wall clock.**
+
+```
+drift/<owner>/<repo>/<workspace>/<base_sha>/<scan_id>/
+scan_id = 20260828T030000Z        # the scheduled tick, from the Cloud Scheduler job
+```
+
+Taken from the tick rather than from `time.Now()`, `scan_id` makes a retried or double-fired
+delivery land on the key it already wrote — write-once turns a duplicate scan into a `412`
+instead of a second issue, the same way `deliveries/` dedupes webhooks. It also sorts
+lexicographically, so "the last five scans of this workspace" is a prefix listing bounded by
+`base_sha`, and per-`base_sha` grouping means a merge naturally starts a fresh series.
+
+**And drift lives under its own top-level prefix**, so `pr/…` and `drift/…` are disjoint
+namespaces rather than two readings of one path. The apply worker composes plan keys from
+`(repo, workspace, base_sha, head_sha)` and prefixes them `pr/`; there is no value of
+`head_sha` that reaches a drift object. §6.6 is what holds if that argument is ever wrong.
+
+**What drift does not write.** No `tfplan`, and no `pending-apply/` marker. The first means
+the artifact an apply consumes does not exist; the second means `/reconcile` — which
+enumerates work by listing that prefix (§5.5) — cannot see drift runs at all. Both are
+absences rather than checks, which is the point: there is no code path to get wrong.
+
+Everything else is unchanged. `plan.json` still embeds a state snapshot, so drift artifacts
+are as sensitive as any other (§5.1) and get the same bucket, CMEK and lifecycle. `meta.json`
+is signed by the same key over the same digest, now covering `kind` (§5.3). And the plan
+worker still never reads back what it wrote: it holds `plan.json` in memory, so the issue
+body is composed before upload, not fetched after it (§5.2).
+
+**Reporting is a single-key lookup.** `drift-open/<owner>/<repo>/<workspace>.json` records the
+issue number and when drift was first seen. A scan that finds changes either opens an issue and
+creates that object with `ifGenerationMatch=0`, or finds it already there and comments on the
+existing issue; a scan that comes back clean closes the issue and deletes the object. One open
+issue per drifted workspace, however many scans run — the alternative, a new issue every tick,
+is how a drift detector gets muted.
 
 ---
 
@@ -622,6 +691,34 @@ response, so the instance is gone between polls and cannot renew anything; a lea
 wait would have to outlive `approval_timeout` — up to 24h — which is not a lease, it is an outage
 waiting for a crashed worker. Two PRs approved at once simply race for the lease at that point,
 which is what it is for.
+
+### 6.6 A drift plan is never applicable
+
+Drift plans and PR plans are produced by the same worker, signed with the same key, and stored
+in the same bucket. The only thing standing between "we plan continuously" and "a scheduled job
+can push to production" is that the apply path refuses drift — so it refuses it three times,
+independently:
+
+| Guard | Fails on | Survives |
+|---|---|---|
+| No `pending-apply/` marker written (§5.6) | `/reconcile` never enumerates the run | a bug in the apply worker |
+| Key prefix is `drift/`, apply composes `pr/` | fetch 404s before verification | a forged task payload |
+| `meta.kind != "pr"` → reject | signed field, checked after KMS verify | both of the above |
+
+The third is the one that has to exist, and the reason is §6.2. A drift scan of `main` plans
+the tree at `main`'s tip — so `meta.planned_tree_sha` is exactly the tree that a
+fast-forwardable merge commit would produce. The tree-SHA comparison, which is the check that
+proves "the applied working tree is the reviewed working tree", **passes** against a drift
+plan. It was never asked to prove the plan came from a reviewed pull request; nothing in that
+comparison distinguishes a plan a human approved from one a cron job produced at 03:00.
+
+So `kind` is checked, it is inside the signature rather than in the object path, and the check
+is a whitelist — `kind == "pr"`, not `kind != "drift"` — because the next artifact kind this
+design grows (a policy dry-run, a cost estimate) should be inapplicable by default rather than
+applicable until someone remembers to add it to a deny list.
+
+The apply worker holds no scheduler trigger and no drift code. It is not that drift chose not
+to apply; it is that the apply service cannot be reached from a clock.
 
 ---
 
@@ -818,8 +915,6 @@ apply outcome so the PR timeline reads as one story.
 - **Policy as code** — `plan.json` already exists at a known key. A gate between "plan
   uploaded" and "check published" that runs conftest against it fails the check on
   violation, and needs no new credentials.
-- **Drift detection** — Cloud Scheduler → the same plan worker with a synthetic
-  `(base_sha, base_sha)` key. Non-empty plan opens an issue.
 - **Cost estimation** — same position in the pipeline as policy, same input.
 - **AWS/Azure** — replace `impersonate_service_account` with WIF; the two-tier
   identity model is unchanged.
