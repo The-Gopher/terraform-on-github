@@ -7,8 +7,8 @@ import (
 	"os"
 	"strings"
 
-	"github.com/anomalyco/terraform-on-github/internal/config"
-	"github.com/anomalyco/terraform-on-github/internal/ghapp"
+	"github.com/The-Gopher/terraform-on-github/internal/config"
+	"github.com/The-Gopher/terraform-on-github/internal/ghapp"
 	"github.com/spf13/cobra"
 )
 

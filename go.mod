@@ -1,4 +1,4 @@
-module github.com/anomalyco/terraform-on-github
+module github.com/The-Gopher/terraform-on-github
 
 go 1.25.0
 
