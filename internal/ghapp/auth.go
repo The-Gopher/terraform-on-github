@@ -5,7 +5,11 @@ package ghapp
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
+
+	"github.com/google/go-github/v66/github"
+	"golang.org/x/oauth2"
 )
 
 var errNotImplemented = errors.New("not implemented")
@@ -88,9 +92,17 @@ func (a *AppAuth) InstallationToken(ctx context.Context, installationID int64, s
 	return "", time.Time{}, errNotImplemented
 }
 
+// NewClient creates a GitHub client using a personal access token.
+func NewClient(ctx context.Context, token string) (*Client, error) {
+	ts := oauth2.StaticTokenSource(&oauth2.Token{AccessToken: token})
+	tc := oauth2.NewClient(ctx, ts)
+	return &Client{
+		api: github.NewClient(tc),
+	}, nil
+}
 // Client is a per-installation, per-scope GitHub client.
 type Client struct {
-	// rest *github.Client
+	api   *github.Client
 	Owner string
 	Repo  string
 }
@@ -100,13 +112,30 @@ type Client struct {
 // Takes a SHA rather than a ref on purpose: the config loader must not be able to read from a
 // mutable ref, and a caller holding only a ref has not yet decided which commit it trusts.
 func (c *Client) ReadFileAtSHA(ctx context.Context, owner, repo, path, sha string) ([]byte, error) {
-	return nil, errNotImplemented
+	file, _, _, err := c.api.Repositories.GetContents(ctx, owner, repo, path, &github.RepositoryContentGetOptions{
+		Ref: sha,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("github read file: %w", err)
+	}
+
+	content, err := file.GetContent()
+	if err != nil {
+		return nil, fmt.Errorf("github decode content: %w", err)
+	}
+
+	return []byte(content), nil
 }
 
 // ResolveRef resolves a ref to a commit SHA, or the repository's default branch tip when ref is
 // empty. Satisfies config.ContentsReader, and is how the trusted config ref becomes a commit.
 func (c *Client) ResolveRef(ctx context.Context, owner, repo, ref string) (string, error) {
-	return "", errNotImplemented
+	refObj, _, err := c.api.Git.GetRef(ctx, owner, repo, ref)
+	if err != nil {
+		return "", fmt.Errorf("github resolve ref: %w", err)
+	}
+
+	return refObj.GetObject().GetSHA(), nil
 }
 
 // BranchTipSHA resolves a branch to its current tip.

@@ -6,9 +6,9 @@ import (
 	"strings"
 	"testing"
 	"time"
-)
 
-// exampleConfig is the file shipped at the repo root, so the worked example and the parser cannot
+	"gopkg.in/yaml.v3"
+)
 // drift apart.
 func exampleConfig(t *testing.T) []byte {
 	t.Helper()
@@ -213,5 +213,31 @@ func TestParseRejectsSecondDocument(t *testing.T) {
 	_, err := Parse([]byte("version: 1\nworkspaces: []\n---\nversion: 1\n"))
 	if err == nil {
 		t.Fatal("two documents are ambiguous about which one governs; must be rejected")
+	}
+}
+func TestExampleRoundTrip(t *testing.T) {
+	raw := exampleConfig(t)
+	cfg1, err := ParseAndValidate(raw)
+	if err != nil {
+		t.Fatalf("initial parse failed: %v", err)
+	}
+
+	// We don't have a Marshal function yet in config.go, but we can check
+	// that parsing the example twice produces the same result.
+	// The "round-trip" usually means YAML -> Struct -> YAML -> Struct.
+	// I'll add a simple Marshal to config.Config or just use yaml.Marshal.
+	
+	out, err := yaml.Marshal(cfg1)
+	if err != nil {
+		t.Fatalf("marshal failed: %v", err)
+	}
+
+	cfg2, err := ParseAndValidate(out)
+	if err != nil {
+		t.Fatalf("second parse failed: %v", err)
+	}
+
+	if cfg1.Version != cfg2.Version || len(cfg1.Workspaces) != len(cfg2.Workspaces) {
+		t.Errorf("round-trip modified config")
 	}
 }

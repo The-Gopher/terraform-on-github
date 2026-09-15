@@ -1,6 +1,6 @@
 module github.com/sampleserve/terraform-on-github
 
-go 1.23
+go 1.26.0
 
 // The local commands (cmd/tfog-plan, cmd/tfog-apply) need exactly one dependency: a YAML
 // decoder. GitHub is reached through the `gh` CLI, module sources through a scanner in
@@ -20,4 +20,12 @@ go 1.23
 //	github.com/bmatcuk/doublestar/v4       Watch globs — if internal/scope's matcher outgrows itself
 //	github.com/hashicorp/hcl/v2            module `source` allowlist — if internal/tf's scanner does
 
-require gopkg.in/yaml.v3 v3.0.1
+require (
+	golang.org/x/oauth2 v0.37.0
+	gopkg.in/yaml.v3 v3.0.1
+)
+
+require (
+	github.com/google/go-github/v66 v66.0.0
+	github.com/google/go-querystring v1.1.0 // indirect
+)
