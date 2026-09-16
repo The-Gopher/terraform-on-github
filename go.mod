@@ -1,4 +1,4 @@
-module github.com/sampleserve/terraform-on-github
+module github.com/the-gopher/terraform-on-github
 
 go 1.26.0
 

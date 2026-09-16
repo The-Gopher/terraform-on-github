@@ -6,8 +6,8 @@ import (
 
 	"github.com/gobwas/glob"
 	"github.com/google/go-github/v60/github"
-	"github.com/sampleserve/terraform-on-github/internal/config"
-	"github.com/sampleserve/terraform-on-github/internal/ghapp"
+	"github.com/the-gopher/terraform-on-github/internal/config"
+	"github.com/the-gopher/terraform-on-github/internal/ghapp"
 )
 
 type Status string
