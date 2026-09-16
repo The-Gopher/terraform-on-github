@@ -52,3 +52,29 @@ func (c *Client) ResolveRef(ctx context.Context, owner, repo, ref string) (strin
 	}
 	return refObj.GetObject().GetSHA(), nil
 }
+
+func (c *Client) GetPullRequest(ctx context.Context, owner, repo string, number int) (*github.PullRequest, error) {
+	pr, _, err := c.gh.PullRequests.Get(ctx, owner, repo, number)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get PR %d: %w", number, err)
+	}
+	return pr, nil
+}
+
+type Comparison struct {
+	Files    []*github.CommitFile
+	AheadBy  int
+	BehindBy int
+}
+
+func (c *Client) CompareCommits(ctx context.Context, owner, repo, base, head string) (*Comparison, error) {
+	res, _, err := c.gh.Repositories.CompareCommits(ctx, owner, repo, base, head, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to compare %s...%s: %w", base, head, err)
+	}
+	return &Comparison{
+		Files:    res.Files,
+		AheadBy:  res.GetAheadBy(),
+		BehindBy: res.GetBehindBy(),
+	}, nil
+}

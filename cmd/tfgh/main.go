@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
@@ -9,120 +10,78 @@ import (
 
 	"github.com/sampleserve/terraform-on-github/internal/config"
 	"github.com/sampleserve/terraform-on-github/internal/ghapp"
+	"github.com/sampleserve/terraform-on-github/internal/scope"
+	"gopkg.in/yaml.v3"
 )
 
 func main() {
-	if len(os.Args) < 2 {
-		fmt.Println("Usage: tfgh <command> [args]")
-		fmt.Println("Commands: config")
+	repo := flag.String("repo", "", "Repository (owner/repo)")
+	prNum := flag.Int("pr", 0, "Pull Request number")
+	configRef := flag.String("config-ref", "", "Config ref override")
+	jsonOut := flag.Bool("json", false, "Output as JSON")
+	flag.Parse()
+
+	if *repo == "" || *prNum == 0 {
+		fmt.Fprintln(os.Stderr, "Error: --repo and --pr are required")
 		os.Exit(1)
 	}
 
-	switch os.Args[1] {
-	case "config":
-		handleConfig()
-	default:
-		fmt.Printf("Unknown command: %s\n", os.Args[1])
+	ctx := context.Background()
+	token := os.Getenv("GITHUB_TOKEN")
+	if token == "" {
+		fmt.Fprintln(os.Stderr, "Error: GITHUB_TOKEN environment variable is required")
 		os.Exit(1)
 	}
-}
 
-func handleConfig() {
-	showCmd := flag.NewFlagSet("show", flag.ExitOnError)
-
-	repo := showCmd.String("repo", "", "Repository (owner/repo)")
-	configRef := showCmd.String("config-ref", "", "Trusted ref override")
-	configPath := showCmd.String("config", "", "Local config file override")
-
-	if len(os.Args) < 3 {
-		fmt.Println("Usage: tfgh config <subcommand>")
-		fmt.Println("Subcommands: show")
-		os.Exit(1)
-	}
-	switch os.Args[2] {
-	case "show":
-		if err := showCmd.Parse(os.Args[3:]); err != nil {
-			fmt.Fprintf(os.Stderr, "Error parsing flags: %v\n", err)
-			os.Exit(1)
-		}
-		if *repo == "" && *configPath == "" {
-			fmt.Println("Error: either --repo or --config must be provided")
-			showCmd.Usage()
-			os.Exit(1)
-		}
-
-		var cfg *config.Config
-		var err error
-
-		if *configPath != "" {
-			cfg, err = config.LoadFromFile(*configPath)
-			if err == nil {
-				fmt.Printf("Loaded config from local file: %s\n", *configPath)
-			}
-		} else {
-			// M1: Resolve the trusted ref, fetch config, parse, validate, print.
-			ctx := context.Background()
-			token := os.Getenv("GITHUB_TOKEN")
-			if token == "" {
-				fmt.Println("Error: GITHUB_TOKEN environment variable is required")
-				os.Exit(1)
-			}
-
-			client := ghapp.NewClient(ctx, token)
-
-			// For v0.1 CLI, we treat the trusted ref as the default branch unless overridden.
-			// In v0.2 this mapping moves to a registry file/database.
-			ref := *configRef
-			if ref == "" {
-				ref = "heads/main" // Fallback to default branch
-			}
-
-			owner, repoName, err := splitRepo(*repo)
-			if err != nil {
-				fmt.Printf("Error parsing repo %q: %v\n", *repo, err)
-				os.Exit(1)
-			}
-
-			sha, err := client.ResolveRef(ctx, owner, repoName, ref)
-			if err != nil {
-				fmt.Printf("Error resolving ref %q: %v\n", ref, err)
-				os.Exit(1)
-			}
-
-			raw, err := client.GetContents(ctx, owner, repoName, config.Filename, sha)
-			if err != nil {
-				fmt.Printf("Error fetching config %q at %s: %v\n", config.Filename, sha, err)
-				os.Exit(1)
-			}
-
-			cfg, err = config.ParseAndValidate(raw)
-			if err != nil {
-				fmt.Printf("Config validation failed:\n%v\n", err)
-				os.Exit(1)
-			}
-			fmt.Printf("Loaded config for %s at %s\n", *repo, sha)
-		}
-
-		if err != nil {
-			fmt.Printf("Error loading config: %v\n", err)
-			os.Exit(1)
-		}
-
-		fmt.Printf("Normalized Workspaces:\n")
-		for _, w := range cfg.Workspaces {
-			fmt.Printf("- %-20s (branch: %-15s, dir: %s)\n", w.Name, w.Branch, w.Dir)
-		}
-
-	default:
-		fmt.Printf("Unknown config subcommand: %s\n", os.Args[2])
-		os.Exit(1)
-	}
-}
-
-func splitRepo(repo string) (string, string, error) {
-	parts := strings.Split(repo, "/")
+	var parts = strings.Split(*repo, "/")
 	if len(parts) != 2 {
-		return "", "", fmt.Errorf("repo must be in format owner/repo")
+		fmt.Fprintln(os.Stderr, "Error: --repo must be in owner/repo format")
+		os.Exit(1)
 	}
-	return parts[0], parts[1], nil
+	owner, repoName := parts[0], parts[1]
+
+	client := ghapp.NewClient(ctx, token)
+
+	ref := "refs/heads/main"
+	if *configRef != "" {
+		ref = *configRef
+	}
+
+	cfgBytes, err := client.GetContents(ctx, owner, repoName, config.Filename, ref)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error loading config: %v\n", err)
+		os.Exit(1)
+	}
+
+	var cfg config.Config
+	if err := yaml.Unmarshal(cfgBytes, &cfg); err != nil {
+		fmt.Fprintf(os.Stderr, "Error parsing config: %v\n", err)
+		os.Exit(1)
+	}
+
+	scoper := scope.NewScoper(client, &cfg)
+	res, err := scoper.Scope(ctx, owner, repoName, *prNum)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error scoping PR: %v\n", err)
+		os.Exit(1)
+	}
+
+	if *jsonOut {
+		out, _ := json.MarshalIndent(res, "", "  ")
+		fmt.Println(string(out))
+		return
+	}
+
+	if res.ConfigChanged {
+		fmt.Println("Advisory: .terraform-on-github.yaml has changed in this PR. Changes take effect after merge to trusted ref.")
+	}
+
+	if len(res.Workspaces) == 0 {
+		fmt.Println("No workspaces in scope.")
+		return
+	}
+
+	for _, w := range res.Workspaces {
+		fmt.Printf("- %s [%s]: %s\n", w.Workspace.Name, w.Status, w.Reason)
+	}
 }
