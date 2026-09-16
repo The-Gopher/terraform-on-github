@@ -10,8 +10,6 @@ import (
 	"github.com/sampleserve/terraform-on-github/internal/config"
 	"github.com/sampleserve/terraform-on-github/internal/ghapp"
 )
-func ptr(s string) *string { return &s }
-
 type mockClient struct {
 	pr        *github.PullRequest
 	refSHA    string
