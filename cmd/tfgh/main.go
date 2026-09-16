@@ -41,7 +41,10 @@ func handleConfig() {
 	}
 	switch os.Args[2] {
 	case "show":
-		showCmd.Parse(os.Args[3:])
+		if err := showCmd.Parse(os.Args[3:]); err != nil {
+			fmt.Fprintf(os.Stderr, "Error parsing flags: %v\n", err)
+			os.Exit(1)
+		}
 		if *repo == "" && *configPath == "" {
 			fmt.Println("Error: either --repo or --config must be provided")
 			showCmd.Usage()
@@ -66,7 +69,7 @@ func handleConfig() {
 			}
 
 			client := ghapp.NewClient(ctx, token)
-			
+
 			// For v0.1 CLI, we treat the trusted ref as the default branch unless overridden.
 			// In v0.2 this mapping moves to a registry file/database.
 			ref := *configRef
