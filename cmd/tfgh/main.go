@@ -7,8 +7,8 @@ import (
 	"os"
 	"strings"
 
-	"github.com/sampleserve/terraform-on-github/internal/config"
-	"github.com/sampleserve/terraform-on-github/internal/ghapp"
+	"github.com/the-gopher/terraform-on-github/internal/config"
+	"github.com/the-gopher/terraform-on-github/internal/ghapp"
 )
 
 func main() {
