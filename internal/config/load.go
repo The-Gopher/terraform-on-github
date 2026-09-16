@@ -5,10 +5,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"path"
 	"regexp"
 	"strings"
-	"os"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -134,7 +134,6 @@ func (l *Loader) LoadAtSHA(ctx context.Context, owner, repo, sha string) (*Confi
 // un-onboarded repository. Callers should return 200 and do nothing.
 var ErrNoConfig = errors.New("repository has no " + Filename + " on its trusted ref")
 
-
 // LoadFromFile reads and validates a config file from the local filesystem.
 func LoadFromFile(path string) (*Config, error) {
 	raw, err := os.ReadFile(path)
@@ -143,6 +142,7 @@ func LoadFromFile(path string) (*Config, error) {
 	}
 	return ParseAndValidate(raw)
 }
+
 // Parse decodes YAML with strict field matching, so a typo in a security-relevant key
 // ("impersonat:") fails loudly instead of silently defaulting.
 //

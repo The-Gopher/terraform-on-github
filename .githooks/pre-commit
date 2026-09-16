@@ -1,0 +1,9 @@
+#!/bin/bash
+
+echo "Running golangci-lint..."
+if ! golangci-lint run; then
+    echo "Linter failed. Please fix the errors before committing."
+    exit 1
+fi
+
+echo "Linter passed!"
