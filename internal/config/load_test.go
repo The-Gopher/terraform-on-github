@@ -118,12 +118,14 @@ func TestRejects(t *testing.T) {
 		{"dir escapes after cleaning", "dir: envs/prod/networking", "dir: envs/../../etc", "escapes"},
 		{"bad name", "name: prod-networking\n", "name: Prod_Networking\n", "name"},
 		{"duplicate name", "name: integration", "name: prod-networking", "duplicate"},
-		{"version range", `terraform_version: "1.9.8"`, `terraform_version: "~> 1.9"`, ""},
+		{"version range", `terraform_version: "1.9.8"`, `terraform_version: "~> 1.9"`, "exact version"},
 		{"bad service account", "tf-prod-networking-plan@acme-tf.iam.gserviceaccount.com", "nope", "service account"},
 		{"bad duration", "plan_timeout: 20m", "plan_timeout: 20 minutes", "duration"},
 		{"missing bucket", "      bucket: acme-tfstate-prod\n", "", "backend"},
 		{"cut on_stale policy", "on_stale: fail", "on_stale: replan_if_equivalent", "replan_if_equivalent"},
 		{"unknown summary detail", "summary_detail: addresses", "summary_detail: verbose", "summary_detail"},
+		{"missing terraform version", `terraform_version: "1.9.8"`, `terraform_version: ""`, "required"},
+		{"bad on_stale", "on_stale: fail", "on_stale: replan_if_equivalent", "removed"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
