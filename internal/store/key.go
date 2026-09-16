@@ -11,12 +11,14 @@
 package store
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
+	"strconv"
 	"time"
 )
-
-var errNotImplemented = errors.New("not implemented")
 
 // PlanKey identifies one plan: a workspace, at a base commit, with a head commit merged in.
 //
@@ -110,6 +112,10 @@ type Meta struct {
 	// See DESIGN.md §6.2.
 	PlannedTreeSHA string `json:"planned_tree_sha"`
 
+	// ConfigRef is the trusted ref's name, for the comment and the audit trail. ConfigRefSHA is
+	// what actually identifies the config version.
+	ConfigRef string `json:"config_ref,omitempty"`
+
 	// ConfigRefSHA is the commit of the trusted ref whose config authorized this run.
 	//
 	// Recorded because the trusted ref moves. Without it, "which version of the mapping said this
@@ -157,4 +163,75 @@ func (c ResourceCounts) Any() bool {
 // Canonicalization has to be exact and version-stable — a signature that verifies only under
 // the encoder that produced it is not a signature. Encode explicit fields in a fixed order
 // rather than marshalling the struct, so adding a field cannot silently invalidate history.
-func (m Meta) Digest() ([]byte, error) { return nil, errNotImplemented }
+func (m Meta) Digest() ([]byte, error) {
+	if m.Schema != SchemaVersion {
+		return nil, fmt.Errorf("store: meta schema %d, want %d", m.Schema, SchemaVersion)
+	}
+	h := sha256.New()
+
+	// Explicit fields in a fixed order, rather than marshalling the struct. A signature that
+	// verifies only under the encoder that produced it is not a signature, and reflecting over
+	// the struct would mean that adding a field silently invalidates every past signature.
+	// Adding a field here is a visible, deliberate act — append it at the end and bump
+	// SchemaVersion.
+	//
+	// Every value is written length-prefixed, so no combination of field values can be reordered
+	// or re-split into the same byte stream. Concatenating bare strings would let
+	// ("ab","c") and ("a","bc") digest identically.
+	fields := []string{
+		strconv.Itoa(m.Schema),
+		m.Owner,
+		m.Repo,
+		strconv.Itoa(m.PR),
+		m.Workspace,
+		m.BaseSHA,
+		m.HeadSHA,
+		m.MergeCommitSHA,
+		m.PlannedTreeSHA,
+		m.ConfigRef,
+		m.ConfigRefSHA,
+		m.TerraformVersion,
+		m.ProviderLockSHA256,
+		m.PlanSHA256,
+		strconv.FormatBool(m.HasChanges),
+		strconv.Itoa(m.Counts.Create),
+		strconv.Itoa(m.Counts.Update),
+		strconv.Itoa(m.Counts.Delete),
+		strconv.Itoa(m.Counts.Replace),
+		strconv.Itoa(m.Counts.Read),
+		// RFC 3339 to the second, in UTC. No float formatting anywhere in the digest: a duration
+		// or timestamp rendered as a float would digest differently across encoders for the same
+		// instant.
+		m.PlannedAt.UTC().Format(time.RFC3339),
+		strconv.FormatInt(int64(m.Duration/time.Second), 10),
+	}
+	for _, f := range fields {
+		writeLengthPrefixed(h, f)
+	}
+	return h.Sum(nil), nil
+}
+
+func writeLengthPrefixed(w io.Writer, s string) {
+	_, _ = fmt.Fprintf(w, "%d:", len(s))
+	_, _ = io.WriteString(w, s)
+	_, _ = io.WriteString(w, "\n")
+}
+
+// SchemaVersion is the only Meta layout this build reads or writes. It is part of the digest, so
+// a change to the field list is a change to every signature.
+const SchemaVersion = 1
+
+// DigestHex is Digest as a hex string, for the places a human reads it — a PR comment, a log
+// line — rather than a signature input.
+func (m Meta) DigestHex() (string, error) {
+	d, err := m.Digest()
+	if err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(d), nil
+}
+
+// errNotImplemented marks the parts of this package that still belong to the two-service
+// deployment: GCS artifacts, the coordination bucket, KMS signing. The local commands use
+// internal/store.Local instead.
+var errNotImplemented = errors.New("not implemented")

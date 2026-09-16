@@ -6,7 +6,49 @@
 // service account, so that rule is a security boundary, not a convention.
 package config
 
-import "time"
+import (
+	"fmt"
+	"time"
+)
+
+// Duration is a time.Duration written the way Go writes one — "30s", "20m", "24h", "1h30m" —
+// rather than as a bare number of seconds, so the config reads like the design document.
+//
+// A named type rather than a plain time.Duration because yaml.v3 decodes a duration only from an
+// integer count of nanoseconds. The usual trick of shadowing the field in an anonymous struct
+// does not work here either: yaml.v3 ignores an un-tagged embedded pointer silently, and panics
+// on a duplicated key when the embed is tagged `,inline`. So the conversion belongs on the type.
+type Duration time.Duration
+
+// Duration returns the value as a time.Duration.
+func (d Duration) Duration() time.Duration { return time.Duration(d) }
+
+func (d Duration) String() string { return time.Duration(d).String() }
+
+// UnmarshalYAML accepts any form time.ParseDuration accepts. An absent or empty value decodes to
+// zero, which is what lets Config.Normalize tell "unset" from "explicitly zero".
+func (d *Duration) UnmarshalYAML(unmarshal func(any) error) error {
+	var s string
+	if err := unmarshal(&s); err != nil {
+		return fmt.Errorf("expected a duration like 30s, 20m or 24h: %w", err)
+	}
+	if s == "" {
+		*d = 0
+		return nil
+	}
+	parsed, err := time.ParseDuration(s)
+	if err != nil {
+		return fmt.Errorf("%q is not a duration; write it as 30s, 20m or 24h", s)
+	}
+	if parsed < 0 {
+		return fmt.Errorf("%q is negative", s)
+	}
+	*d = Duration(parsed)
+	return nil
+}
+
+// MarshalYAML writes the human form back, so a round-trip does not turn "20m" into 1200000000000.
+func (d Duration) MarshalYAML() (any, error) { return time.Duration(d).String(), nil }
 
 // SchemaVersion is the only accepted value of the top-level `version` key. Bumping it is a
 // breaking change requiring a migration path for every consuming repo.
@@ -33,8 +75,8 @@ type Config struct {
 // Defaults supplies values for any Workspace field left unset. Applied by Config.Normalize.
 type Defaults struct {
 	TerraformVersion string        `yaml:"terraform_version"`
-	PlanTimeout      time.Duration `yaml:"plan_timeout"`
-	ApplyTimeout     time.Duration `yaml:"apply_timeout"`
+	PlanTimeout      Duration      `yaml:"plan_timeout"`
+	ApplyTimeout     Duration      `yaml:"apply_timeout"`
 	SummaryDetail    SummaryDetail `yaml:"summary_detail"`
 	VarFiles         []string      `yaml:"var_files"`
 	PlanArgs         []string      `yaml:"plan_args"`
@@ -69,8 +111,8 @@ type Workspace struct {
 
 	// Inherited from Defaults when unset.
 	TerraformVersion string        `yaml:"terraform_version"`
-	PlanTimeout      time.Duration `yaml:"plan_timeout"`
-	ApplyTimeout     time.Duration `yaml:"apply_timeout"`
+	PlanTimeout      Duration      `yaml:"plan_timeout"`
+	ApplyTimeout     Duration      `yaml:"apply_timeout"`
 	SummaryDetail    SummaryDetail `yaml:"summary_detail"`
 	VarFiles         []string      `yaml:"var_files"`
 	PlanArgs         []string      `yaml:"plan_args"`
@@ -114,7 +156,7 @@ type ApplyPolicy struct {
 
 	// ApprovalTimeout bounds how long the worker will poll for environment approval. On expiry
 	// the run is abandoned, never applied.
-	ApprovalTimeout time.Duration `yaml:"approval_timeout"`
+	ApprovalTimeout Duration `yaml:"approval_timeout"`
 
 	// OnStale decides what to do when the saved plan no longer matches reality. See
 	// DESIGN.md §6.3 — `fail` is the correct default for anything you would page about.
