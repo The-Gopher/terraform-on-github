@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strings"
 
 	"github.com/sampleserve/terraform-on-github/internal/config"
 	"github.com/sampleserve/terraform-on-github/internal/ghapp"
@@ -42,11 +43,11 @@ func main() {
 }
 
 func runConfigShow(ctx context.Context, reader config.ContentsReader, trustedRefs config.TrustedRefs, repo, configRef string) error {
-	var owner, repoName string
-	fmt.Sscanf(repo, "%s/%s", &owner, &repoName)
-	if owner == "" || repoName == "" {
+	parts := strings.SplitN(repo, "/", 2)
+	if len(parts) != 2 {
 		return fmt.Errorf("repo must be in form owner/repo")
 	}
+	owner, repoName := parts[0], parts[1]
 
 	ref := configRef
 	if ref == "" {
