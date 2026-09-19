@@ -8,4 +8,7 @@ require (
 	gopkg.in/yaml.v3 v3.0.1
 )
 
-require github.com/google/go-querystring v1.1.0 // indirect
+require (
+	github.com/gobwas/glob v1.0.0 // indirect
+	github.com/google/go-querystring v1.1.0 // indirect
+)

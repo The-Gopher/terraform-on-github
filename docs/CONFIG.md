@@ -46,16 +46,6 @@ The repo's declaration of which branches control which Terraform.
 Both identities are required, and validated as service-account emails. The config describes what
 the workspace *needs*, not what a particular runner happens to hold.
 
-## `workspaces[].apply`
-
-| Key | Type | Default | Notes |
-|---|---|---|---|
-| `enabled` | bool | `true` | `false` = plan-only workspace. |
-| `environment` | string | `name` | GitHub Environment used as the approval gate. Protection rules live in GitHub, not here. |
-| `approval_timeout` | duration | `24h` | After this the run is abandoned, not applied. |
-| `on_stale` | enum | `fail` | `fail` is the only accepted value. `replan_if_equivalent` was **cut** — §4.1's up-to-date requirement removes the case it existed for, and it is rejected at validation with that explanation (DESIGN §6.3). |
-| `require_protected_base` | bool | `false` | Refuse to apply unless `branch` actually has required reviews. Asserts what §3.1's original justification assumed. Costs the App `administration: read`, so enable per workspace — sensible for prod, pointless for an integration branch that is open by design. |
-
 ---
 
 ## Validation rules
