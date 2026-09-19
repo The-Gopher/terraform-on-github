@@ -207,11 +207,6 @@ const (
 	StaleReplanIfEquivalent StalePolicy = "replan_if_equivalent"
 )
 
-// ApplyEnabled reports whether merges to this workspace's branch should apply.
-func (w Workspace) ApplyEnabled() bool {
-	return w.Apply.Enabled == nil || *w.Apply.Enabled
-}
-
 // Environment returns the GitHub Environment name, defaulting to the workspace name.
 func (w Workspace) Environment() string {
 	if w.Apply.Environment != "" {

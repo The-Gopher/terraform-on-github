@@ -3,6 +3,7 @@ package ghapp
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/google/go-github/v60/github"
 	"golang.org/x/oauth2"
@@ -45,8 +46,20 @@ func (c *Client) GetContents(ctx context.Context, owner, repo, path, ref string)
 	return []byte(content), nil
 }
 
+// normalizeRef expands a bare branch name into a fully qualified ref. The
+// GitHub refs API only accepts qualified refs (heads/main, tags/v1), but PR
+// payloads carry bare branch names.
+func normalizeRef(ref string) string {
+	switch {
+	case strings.HasPrefix(ref, "refs/"), strings.HasPrefix(ref, "heads/"), strings.HasPrefix(ref, "tags/"):
+		return ref
+	default:
+		return "heads/" + ref
+	}
+}
+
 func (c *Client) ResolveRef(ctx context.Context, owner, repo, ref string) (string, error) {
-	refObj, _, err := c.gh.Git.GetRef(ctx, owner, repo, ref)
+	refObj, _, err := c.gh.Git.GetRef(ctx, owner, repo, normalizeRef(ref))
 	if err != nil {
 		return "", fmt.Errorf("failed to resolve ref %q: %w", ref, err)
 	}

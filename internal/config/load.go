@@ -299,8 +299,7 @@ func (c *Config) Validate() error {
 		}
 	}
 
-	// Two workspaces on the same branch with overlapping dirs would both plan the same root
-	// module against different backends — almost always a copy-paste mistake, and ambiguous.
+	// Check for duplicates of same repo-dir and  same terraform workspace.
 	errs = append(errs, c.validateNoOverlap()...)
 
 	return errors.Join(errs...)
@@ -310,10 +309,10 @@ func (c *Config) validateNoOverlap() []error {
 	var errs []error
 	for i, a := range c.Workspaces {
 		for _, b := range c.Workspaces[i+1:] {
-			if a.Branch == b.Branch && dirsOverlap(a.Dir, b.Dir) {
+			if dirsOverlap(a.Dir, b.Dir) && a.TerraformWorkspace == b.TerraformWorkspace {
 				errs = append(errs, fmt.Errorf(
-					"workspaces[%q] and workspaces[%q]: both on branch %q with overlapping dirs %q and %q",
-					a.Name, b.Name, a.Branch, a.Dir, b.Dir))
+					"duplicate workspaces (%q) for dir (%q)",
+					a.TerraformWorkspace, a.Dir))
 			}
 		}
 	}
