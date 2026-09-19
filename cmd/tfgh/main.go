@@ -57,6 +57,7 @@ func runConfig(args []string) {
 	fs := flag.NewFlagSet("config", flag.ExitOnError)
 	repo := fs.String("repo", "", "Repository (owner/repo)")
 	configRef := fs.String("config-ref", "", "Config ref override (default refs/heads/main)")
+	configFile := fs.String("config", "", "Path to local config file")
 	jsonOut := fs.Bool("json", false, "Output as JSON")
 	_ = fs.Parse(args)
 
@@ -67,7 +68,7 @@ func runConfig(args []string) {
 	ctx := context.Background()
 	client, owner, repoName := setup(*repo)
 
-	cfg := loadConfig(ctx, client, owner, repoName, *configRef, validate)
+	cfg := loadConfig(ctx, client, owner, repoName, *configRef, *configFile, validate)
 
 	if *jsonOut {
 		printJSON(cfg)
@@ -112,6 +113,7 @@ func runScope(args []string) {
 	repo := fs.String("repo", "", "Repository (owner/repo)")
 	prNum := fs.Int("pr", 0, "Pull Request number")
 	configRef := fs.String("config-ref", "", "Config ref override (default refs/heads/main)")
+	configFile := fs.String("config", "", "Path to local config file")
 	jsonOut := fs.Bool("json", false, "Output as JSON")
 	_ = fs.Parse(args)
 
@@ -125,7 +127,7 @@ func runScope(args []string) {
 	// Normalize only. Validate here would be the stricter, better behavior, but scope did not
 	// validate before subcommands existed and turning it on now breaks every repo that uses the
 	// `terraform_workspace` escape hatch — see validateNoOverlap and DESIGN.md §13.1.
-	cfg := loadConfig(ctx, client, owner, repoName, *configRef, normalizeOnly)
+	cfg := loadConfig(ctx, client, owner, repoName, *configRef, *configFile, normalizeOnly)
 
 	scoper := scope.NewScoper(client, cfg)
 	res, err := scoper.Scope(ctx, owner, repoName, *prNum)
@@ -175,14 +177,23 @@ const (
 
 // loadConfig fetches the config at ref, always normalizing it — an un-normalized config reads
 // back defaults as unset — and validating it when the caller asks.
-func loadConfig(ctx context.Context, client *ghapp.Client, owner, repo, ref string, check bool) *config.Config {
-	if ref == "" {
-		ref = "refs/heads/main"
-	}
+func loadConfig(ctx context.Context, client *ghapp.Client, owner, repo, ref, localFile string, check bool) *config.Config {
+	var raw []byte
+	var err error
 
-	raw, err := client.GetContents(ctx, owner, repo, config.Filename, ref)
-	if err != nil {
-		fatalf("loading config: %v", err)
+	if localFile != "" {
+		raw, err = os.ReadFile(localFile)
+		if err != nil {
+			fatalf("reading local config: %v", err)
+		}
+	} else {
+		if ref == "" {
+			ref = "refs/heads/main"
+		}
+		raw, err = client.GetContents(ctx, owner, repo, config.Filename, ref)
+		if err != nil {
+			fatalf("loading config from GitHub: %v", err)
+		}
 	}
 
 	cfg, err := config.Parse(raw)
