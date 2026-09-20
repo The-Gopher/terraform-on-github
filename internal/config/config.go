@@ -149,11 +149,6 @@ type ApplyPolicy struct {
 	// Enabled false makes this a plan-only workspace.
 	Enabled *bool `yaml:"enabled"`
 
-	// Environment is the GitHub Environment used as the approval gate. Protection rules
-	// (required reviewers, wait timer) are configured in GitHub, deliberately not here, so the
-	// audit trail lives with the repo. Defaults to Name.
-	Environment string `yaml:"environment"`
-
 	// ApprovalTimeout bounds how long the worker will poll for environment approval. On expiry
 	// the run is abandoned, never applied.
 	ApprovalTimeout Duration `yaml:"approval_timeout"`
@@ -207,11 +202,7 @@ const (
 	StaleReplanIfEquivalent StalePolicy = "replan_if_equivalent"
 )
 
-// Environment returns the GitHub Environment name, defaulting to the workspace name.
 func (w Workspace) Environment() string {
-	if w.Apply.Environment != "" {
-		return w.Apply.Environment
-	}
 	return w.Name
 }
 

@@ -96,7 +96,6 @@ workspaces:
       plan:  tf-prod-networking-plan@acme-tf.iam.gserviceaccount.com
       apply: tf-prod-networking-apply@acme-tf.iam.gserviceaccount.com
     apply:
-      environment: prod-networking
       on_stale: fail
       require_protected_base: true
 
@@ -108,7 +107,6 @@ workspaces:
       plan:  tf-prod-data-plan@acme-tf.iam.gserviceaccount.com
       apply: tf-prod-data-apply@acme-tf.iam.gserviceaccount.com
     apply:
-      environment: prod-data
       on_stale: fail
 
   # ---- integration: developers merge here freely ----
@@ -125,7 +123,6 @@ workspaces:
       plan:  tf-integration-plan@acme-tf.iam.gserviceaccount.com
       apply: tf-integration-apply@acme-tf.iam.gserviceaccount.com
     apply:
-      environment: integration   # no required reviewers on this one
 
   # ---- a long-lived release branch, plan-only ----
   - name: prod-networking-next
