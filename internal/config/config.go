@@ -146,9 +146,6 @@ type Impersonate struct {
 
 // ApplyPolicy governs what happens after merge.
 type ApplyPolicy struct {
-	// Enabled false makes this a plan-only workspace.
-	Enabled *bool `yaml:"enabled"`
-
 	// ApprovalTimeout bounds how long the worker will poll for environment approval. On expiry
 	// the run is abandoned, never applied.
 	ApprovalTimeout Duration `yaml:"approval_timeout"`

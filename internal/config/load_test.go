@@ -86,12 +86,7 @@ func TestApplyDefaults(t *testing.T) {
 	}
 	integration, _ := c.Workspace("integration")
 	next, _ := c.Workspace("prod-networking-next")
-	if integration.Apply.Enabled == nil || *integration.Apply.Enabled == false {
-		t.Error("integration: apply should default to enabled")
-	}
-	if next.Apply.Enabled != nil && *next.Apply.Enabled == true {
-		t.Error("prod-networking-next: apply is explicitly disabled")
-	}
+	// Apply is now always enabled for all workspaces.
 	if got := integration.Environment(); got != "integration" {
 		t.Errorf("environment should default to the workspace name, got %q", got)
 	}
