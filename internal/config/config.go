@@ -154,15 +154,6 @@ type ApplyPolicy struct {
 	// DESIGN.md §6.3 — `fail` is the correct default for anything you would page about.
 	OnStale StalePolicy `yaml:"on_stale"`
 
-	// RequireProtectedBase refuses to apply unless Workspace.Branch actually has required
-	// reviews, checked via the branch-protection API.
-	//
-	// This asserts at runtime the thing §3.1's original justification merely assumed — that a
-	// base branch is reviewed — and would have caught that bug. It costs the App the
-	// `administration: read` permission, a real widening of §7.3's minimum set, so it is
-	// per-workspace rather than a global default: worth it for prod-tier workspaces, not for
-	// integration ones that are open to developers on purpose.
-	RequireProtectedBase bool `yaml:"require_protected_base"`
 }
 
 // SummaryDetail controls how much of the plan is rendered into the GitHub check.
