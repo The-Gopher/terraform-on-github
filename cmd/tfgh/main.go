@@ -81,28 +81,28 @@ func runConfig(args []string) {
 // printConfig renders the normalized workspace set — the "what did the defaults actually
 // resolve to" view that makes the command worth running over reading the YAML.
 func printConfig(w io.Writer, cfg *config.Config) {
-	_, _ = fmt.Fprintf(w, "version: %d\n", cfg.Version)
+	fmt.Fprintf(w, "version: %d\n", cfg.Version)
 	if len(cfg.ModuleSources) > 0 {
-		_, _ = fmt.Fprintf(w, "module_sources: %s\n", strings.Join(cfg.ModuleSources, ", "))
+		fmt.Fprintf(w, "module_sources: %s\n", strings.Join(cfg.ModuleSources, ", "))
 	}
 	if len(cfg.Workspaces) == 0 {
-		_, _ = fmt.Fprintln(w, "No workspaces defined.")
+		fmt.Fprintln(w, "No workspaces defined.")
 		return
 	}
 	for _, ws := range cfg.Workspaces {
-		_, _ = fmt.Fprintf(w, "\n- %s\n", ws.Name)
-		_, _ = fmt.Fprintf(w, "    branch:      %s\n", ws.Branch)
-		_, _ = fmt.Fprintf(w, "    dir:         %s\n", ws.Dir)
+		fmt.Fprintf(w, "\n- %s\n", ws.Name)
+		fmt.Fprintf(w, "    branch:      %s\n", ws.Branch)
+		fmt.Fprintf(w, "    dir:         %s\n", ws.Dir)
 		if len(ws.Watch) > 0 {
-			_, _ = fmt.Fprintf(w, "    watch:       %s\n", strings.Join(ws.Watch, ", "))
+			fmt.Fprintf(w, "    watch:       %s\n", strings.Join(ws.Watch, ", "))
 		}
 		if ws.TerraformWorkspace != "" {
-			_, _ = fmt.Fprintf(w, "    tf_workspace: %s\n", ws.TerraformWorkspace)
+			fmt.Fprintf(w, "    tf_workspace: %s\n", ws.TerraformWorkspace)
 		}
-		_, _ = fmt.Fprintf(w, "    terraform:   %s\n", ws.TerraformVersion)
-		_, _ = fmt.Fprintf(w, "    backend:     gs://%s/%s\n", ws.Backend.Bucket, ws.Backend.Prefix)
-		_, _ = fmt.Fprintf(w, "    impersonate: plan=%s apply=%s\n", ws.Impersonate.Plan, ws.Impersonate.Apply)
-		_, _ = fmt.Fprintf(w, "    apply:       enabled, environment=%s on_stale=%s\n", ws.Environment(), ws.Apply.OnStale)
+		fmt.Fprintf(w, "    terraform:   %s\n", ws.TerraformVersion)
+		fmt.Fprintf(w, "    backend:     gs://%s/%s\n", ws.Backend.Bucket, ws.Backend.Prefix)
+		fmt.Fprintf(w, "    impersonate: plan=%s apply=%s\n", ws.Impersonate.Plan, ws.Impersonate.Apply)
+		fmt.Fprintf(w, "    apply:       enabled, environment=%s on_stale=%s\n", ws.Environment(), ws.Apply.OnStale)
 	}
 }
 
