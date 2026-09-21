@@ -85,7 +85,6 @@ func TestApplyDefaults(t *testing.T) {
 		t.Fatal(err)
 	}
 	integration, _ := c.Workspace("integration")
-	next, _ := c.Workspace("prod-networking-next")
 	// Apply is now always enabled for all workspaces.
 	if got := integration.Environment(); got != "integration" {
 		t.Errorf("environment should default to the workspace name, got %q", got)

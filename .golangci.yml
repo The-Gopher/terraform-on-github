@@ -1,6 +1,2 @@
-linters-settings:
-  errcheck:
-    exclude:
-      - fmt.Fprintf
-      - fmt.Fprintln
-      - fmt.Printf
+version: "2"
+

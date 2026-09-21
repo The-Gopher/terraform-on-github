@@ -80,6 +80,7 @@ func runConfig(args []string) {
 
 // printConfig renders the normalized workspace set — the "what did the defaults actually
 // resolve to" view that makes the command worth running over reading the YAML.
+// nolint:errcheck
 func printConfig(w io.Writer, cfg *config.Config) {
 	fmt.Fprintf(w, "version: %d\n", cfg.Version)
 	if len(cfg.ModuleSources) > 0 {
