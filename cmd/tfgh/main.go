@@ -11,6 +11,9 @@ import (
 	"os"
 	"strings"
 
+	"github.com/the-gopher/terraform-on-github/internal/plan"
+	"github.com/the-gopher/terraform-on-github/internal/tf"
+	"time"
 	"github.com/the-gopher/terraform-on-github/internal/config"
 	"github.com/the-gopher/terraform-on-github/internal/ghapp"
 	"github.com/the-gopher/terraform-on-github/internal/scope"
@@ -43,6 +46,8 @@ func main() {
 		runConfig(args)
 	case "scope":
 		runScope(args)
+	case "plan":
+		runPlan(args)
 	case "help", "-h", "--help":
 		fmt.Print(usage)
 	default:
@@ -153,6 +158,43 @@ func runScope(args []string) {
 	for _, w := range res.Workspaces {
 		fmt.Printf("- %s [%s]: %s\n", w.Workspace.Name, w.Status, w.Reason)
 	}
+}
+func runPlan(args []string) {
+	fs := flag.NewFlagSet("plan", flag.ExitOnError)
+	repo := fs.String("repo", "", "Repository (owner/repo)")
+	pr := fs.String("pr", "", "PR number")
+	workspace := fs.String("workspace", "", "Workspace name")
+	if err := fs.Parse(args); err != nil {
+		os.Exit(1)
+	}
+
+	if *repo == "" || *pr == "" || *workspace == "" {
+		fs.Usage()
+		os.Exit(1)
+	}
+
+	client, owner, repoName := setup(*repo)
+	_ = loadConfig(context.Background(), client, owner, repoName, "", "", validate)
+
+	runner := tf.NewRunner(".", 10*time.Minute)
+	planner := plan.NewPlanner(runner)
+
+	fmt.Printf("Planning workspace %q in %s...\n", *workspace, *repo)
+	res, err := planner.Plan(context.Background())
+	if err != nil {
+		fatalf("planning failed: %v", err)
+	}
+
+	if res.Error != nil {
+		fmt.Printf("Verdict: FAILURE\n%s\n", res.Summary)
+		os.Exit(1)
+	}
+
+	status := "NO CHANGES"
+	if res.ExitCode == 2 {
+		status = "CHANGES"
+	}
+	fmt.Printf("Verdict: %s\n\n%s\n", status, res.Summary)
 }
 
 // setup validates the shared flags every command takes and builds an authenticated client.
