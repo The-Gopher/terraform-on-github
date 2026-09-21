@@ -1,128 +1,225 @@
+// Command tfgh runs the terraform-on-github steps by hand, one verb per step, against a
+// repository's .terraform-on-github.yaml. See docs/ROADMAP.md §3.
 package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 
 	"github.com/the-gopher/terraform-on-github/internal/config"
 	"github.com/the-gopher/terraform-on-github/internal/ghapp"
+	"github.com/the-gopher/terraform-on-github/internal/scope"
 )
+
+const usage = `tfgh — terraform-on-github
+
+Usage:
+  tfgh <command> [flags]
+
+Commands:
+  config   Fetch, validate and print a repository's normalized workspace set
+  scope    Given a PR, print the workspaces it affects and why
+
+Run "tfgh <command> -h" for a command's flags.
+
+Environment:
+  GITHUB_TOKEN   required by every command
+`
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Println("Usage: tfgh <command> [args]")
-		fmt.Println("Commands: config")
-		os.Exit(1)
+		fmt.Fprint(os.Stderr, usage)
+		os.Exit(2)
 	}
 
+	args := os.Args[2:]
 	switch os.Args[1] {
 	case "config":
-		handleConfig()
+		runConfig(args)
+	case "scope":
+		runScope(args)
+	case "help", "-h", "--help":
+		fmt.Print(usage)
 	default:
-		fmt.Printf("Unknown command: %s\n", os.Args[1])
-		os.Exit(1)
+		fmt.Fprintf(os.Stderr, "Error: unknown command %q\n\n%s", os.Args[1], usage)
+		os.Exit(2)
 	}
 }
 
-func handleConfig() {
-	showCmd := flag.NewFlagSet("show", flag.ExitOnError)
+// runConfig implements M1: resolve the config ref, fetch the file at *that* ref, parse,
+// validate, and print the normalized workspaces.
+func runConfig(args []string) {
+	fs := flag.NewFlagSet("config", flag.ExitOnError)
+	repo := fs.String("repo", "", "Repository (owner/repo)")
+	configRef := fs.String("config-ref", "", "Config ref override (default refs/heads/main)")
+	configFile := fs.String("config", "", "Path to local config file")
+	jsonOut := fs.Bool("json", false, "Output as JSON")
+	_ = fs.Parse(args)
 
-	repo := showCmd.String("repo", "", "Repository (owner/repo)")
-	configRef := showCmd.String("config-ref", "", "Trusted ref override")
-	configPath := showCmd.String("config", "", "Local config file override")
-
-	if len(os.Args) < 3 {
-		fmt.Println("Usage: tfgh config <subcommand>")
-		fmt.Println("Subcommands: show")
-		os.Exit(1)
+	if *repo == "" {
+		fatalf("--repo is required")
 	}
-	switch os.Args[2] {
-	case "show":
-		if err := showCmd.Parse(os.Args[3:]); err != nil {
-			fmt.Fprintf(os.Stderr, "Error parsing flags: %v\n", err)
-			os.Exit(1)
+
+	ctx := context.Background()
+	client, owner, repoName := setup(*repo)
+
+	cfg := loadConfig(ctx, client, owner, repoName, *configRef, *configFile, validate)
+
+	if *jsonOut {
+		printJSON(cfg)
+		return
+	}
+
+	printConfig(os.Stdout, cfg)
+}
+
+// printConfig renders the normalized workspace set — the "what did the defaults actually
+// resolve to" view that makes the command worth running over reading the YAML.
+// nolint:errcheck
+func printConfig(w io.Writer, cfg *config.Config) {
+	fmt.Fprintf(w, "version: %d\n", cfg.Version)
+	if len(cfg.ModuleSources) > 0 {
+		fmt.Fprintf(w, "module_sources: %s\n", strings.Join(cfg.ModuleSources, ", "))
+	}
+	if len(cfg.Workspaces) == 0 {
+		fmt.Fprintln(w, "No workspaces defined.")
+		return
+	}
+	for _, ws := range cfg.Workspaces {
+		fmt.Fprintf(w, "\n- %s\n", ws.Name)
+		fmt.Fprintf(w, "    branch:      %s\n", ws.Branch)
+		fmt.Fprintf(w, "    dir:         %s\n", ws.Dir)
+		if len(ws.Watch) > 0 {
+			fmt.Fprintf(w, "    watch:       %s\n", strings.Join(ws.Watch, ", "))
 		}
-		if *repo == "" && *configPath == "" {
-			fmt.Println("Error: either --repo or --config must be provided")
-			showCmd.Usage()
-			os.Exit(1)
+		if ws.TerraformWorkspace != "" {
+			fmt.Fprintf(w, "    tf_workspace: %s\n", ws.TerraformWorkspace)
 		}
-
-		var cfg *config.Config
-		var err error
-
-		if *configPath != "" {
-			cfg, err = config.LoadFromFile(*configPath)
-			if err == nil {
-				fmt.Printf("Loaded config from local file: %s\n", *configPath)
-			}
-		} else {
-			// M1: Resolve the trusted ref, fetch config, parse, validate, print.
-			ctx := context.Background()
-			token := os.Getenv("GITHUB_TOKEN")
-			if token == "" {
-				fmt.Println("Error: GITHUB_TOKEN environment variable is required")
-				os.Exit(1)
-			}
-
-			client := ghapp.NewClient(ctx, token)
-
-			// For v0.1 CLI, we treat the trusted ref as the default branch unless overridden.
-			// In v0.2 this mapping moves to a registry file/database.
-			ref := *configRef
-			if ref == "" {
-				ref = "heads/main" // Fallback to default branch
-			}
-
-			owner, repoName, err := splitRepo(*repo)
-			if err != nil {
-				fmt.Printf("Error parsing repo %q: %v\n", *repo, err)
-				os.Exit(1)
-			}
-
-			sha, err := client.ResolveRef(ctx, owner, repoName, ref)
-			if err != nil {
-				fmt.Printf("Error resolving ref %q: %v\n", ref, err)
-				os.Exit(1)
-			}
-
-			raw, err := client.GetContents(ctx, owner, repoName, config.Filename, sha)
-			if err != nil {
-				fmt.Printf("Error fetching config %q at %s: %v\n", config.Filename, sha, err)
-				os.Exit(1)
-			}
-
-			cfg, err = config.ParseAndValidate(raw)
-			if err != nil {
-				fmt.Printf("Config validation failed:\n%v\n", err)
-				os.Exit(1)
-			}
-			fmt.Printf("Loaded config for %s at %s\n", *repo, sha)
-		}
-
-		if err != nil {
-			fmt.Printf("Error loading config: %v\n", err)
-			os.Exit(1)
-		}
-
-		fmt.Printf("Normalized Workspaces:\n")
-		for _, w := range cfg.Workspaces {
-			fmt.Printf("- %-20s (branch: %-15s, dir: %s)\n", w.Name, w.Branch, w.Dir)
-		}
-
-	default:
-		fmt.Printf("Unknown config subcommand: %s\n", os.Args[2])
-		os.Exit(1)
+		fmt.Fprintf(w, "    terraform:   %s\n", ws.TerraformVersion)
+		fmt.Fprintf(w, "    backend:     gs://%s/%s\n", ws.Backend.Bucket, ws.Backend.Prefix)
+		fmt.Fprintf(w, "    impersonate: plan=%s apply=%s\n", ws.Impersonate.Plan, ws.Impersonate.Apply)
+		fmt.Fprintf(w, "    apply:       enabled, environment=%s on_stale=%s\n", ws.Environment(), ws.Apply.OnStale)
 	}
 }
 
-func splitRepo(repo string) (string, string, error) {
+// runScope implements M2: filter the config's workspaces by the PR's base branch and changed
+// paths, printing the path that pulled each one in.
+func runScope(args []string) {
+	fs := flag.NewFlagSet("scope", flag.ExitOnError)
+	repo := fs.String("repo", "", "Repository (owner/repo)")
+	prNum := fs.Int("pr", 0, "Pull Request number")
+	configRef := fs.String("config-ref", "", "Config ref override (default refs/heads/main)")
+	configFile := fs.String("config", "", "Path to local config file")
+	jsonOut := fs.Bool("json", false, "Output as JSON")
+	_ = fs.Parse(args)
+
+	if *repo == "" || *prNum == 0 {
+		fatalf("--repo and --pr are required")
+	}
+
+	ctx := context.Background()
+	client, owner, repoName := setup(*repo)
+
+	// Normalize only. Validate here would be the stricter, better behavior, but scope did not
+	// validate before subcommands existed and turning it on now breaks every repo that uses the
+	// `terraform_workspace` escape hatch — see validateNoOverlap and DESIGN.md §13.1.
+	cfg := loadConfig(ctx, client, owner, repoName, *configRef, *configFile, normalizeOnly)
+
+	scoper := scope.NewScoper(client, cfg)
+	res, err := scoper.Scope(ctx, owner, repoName, *prNum)
+	if err != nil {
+		fatalf("scoping PR: %v", err)
+	}
+
+	if *jsonOut {
+		printJSON(res)
+		return
+	}
+
+	if res.ConfigChanged {
+		fmt.Printf("Advisory: %s has changed in this PR. Changes take effect after merge to trusted ref.\n", config.Filename)
+	}
+
+	if len(res.Workspaces) == 0 {
+		fmt.Println("No workspaces in scope.")
+		return
+	}
+
+	for _, w := range res.Workspaces {
+		fmt.Printf("- %s [%s]: %s\n", w.Workspace.Name, w.Status, w.Reason)
+	}
+}
+
+// setup validates the shared flags every command takes and builds an authenticated client.
+func setup(repo string) (*ghapp.Client, string, string) {
+	token := os.Getenv("GITHUB_TOKEN")
+	if token == "" {
+		fatalf("GITHUB_TOKEN environment variable is required")
+	}
+
 	parts := strings.Split(repo, "/")
-	if len(parts) != 2 {
-		return "", "", fmt.Errorf("repo must be in format owner/repo")
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+		fatalf("--repo must be in owner/repo format")
 	}
-	return parts[0], parts[1], nil
+
+	return ghapp.NewClient(context.Background(), token), parts[0], parts[1]
+}
+
+// Whether loadConfig runs Config.Validate after normalizing.
+const (
+	validate      = true
+	normalizeOnly = false
+)
+
+// loadConfig fetches the config at ref, always normalizing it — an un-normalized config reads
+// back defaults as unset — and validating it when the caller asks.
+func loadConfig(ctx context.Context, client *ghapp.Client, owner, repo, ref, localFile string, check bool) *config.Config {
+	var raw []byte
+	var err error
+
+	if localFile != "" {
+		raw, err = os.ReadFile(localFile)
+		if err != nil {
+			fatalf("reading local config: %v", err)
+		}
+	} else {
+		if ref == "" {
+			ref = "refs/heads/main"
+		}
+		raw, err = client.GetContents(ctx, owner, repo, config.Filename, ref)
+		if err != nil {
+			fatalf("loading config from GitHub: %v", err)
+		}
+	}
+
+	cfg, err := config.Parse(raw)
+	if err != nil {
+		fatalf("parsing config: %v", err)
+	}
+	cfg.Normalize()
+
+	if check {
+		if err := cfg.Validate(); err != nil {
+			fatalf("invalid config: %v", err)
+		}
+	}
+	return cfg
+}
+
+func printJSON(v any) {
+	out, err := json.MarshalIndent(v, "", "  ")
+	if err != nil {
+		fatalf("encoding JSON: %v", err)
+	}
+	fmt.Println(string(out))
+}
+
+func fatalf(format string, args ...any) {
+	fmt.Fprintf(os.Stderr, "Error: "+format+"\n", args...)
+	os.Exit(1)
 }

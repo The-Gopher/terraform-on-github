@@ -146,14 +146,6 @@ type Impersonate struct {
 
 // ApplyPolicy governs what happens after merge.
 type ApplyPolicy struct {
-	// Enabled false makes this a plan-only workspace.
-	Enabled *bool `yaml:"enabled"`
-
-	// Environment is the GitHub Environment used as the approval gate. Protection rules
-	// (required reviewers, wait timer) are configured in GitHub, deliberately not here, so the
-	// audit trail lives with the repo. Defaults to Name.
-	Environment string `yaml:"environment"`
-
 	// ApprovalTimeout bounds how long the worker will poll for environment approval. On expiry
 	// the run is abandoned, never applied.
 	ApprovalTimeout Duration `yaml:"approval_timeout"`
@@ -162,15 +154,6 @@ type ApplyPolicy struct {
 	// DESIGN.md §6.3 — `fail` is the correct default for anything you would page about.
 	OnStale StalePolicy `yaml:"on_stale"`
 
-	// RequireProtectedBase refuses to apply unless Workspace.Branch actually has required
-	// reviews, checked via the branch-protection API.
-	//
-	// This asserts at runtime the thing §3.1's original justification merely assumed — that a
-	// base branch is reviewed — and would have caught that bug. It costs the App the
-	// `administration: read` permission, a real widening of §7.3's minimum set, so it is
-	// per-workspace rather than a global default: worth it for prod-tier workspaces, not for
-	// integration ones that are open to developers on purpose.
-	RequireProtectedBase bool `yaml:"require_protected_base"`
 }
 
 // SummaryDetail controls how much of the plan is rendered into the GitHub check.
@@ -207,16 +190,7 @@ const (
 	StaleReplanIfEquivalent StalePolicy = "replan_if_equivalent"
 )
 
-// ApplyEnabled reports whether merges to this workspace's branch should apply.
-func (w Workspace) ApplyEnabled() bool {
-	return w.Apply.Enabled == nil || *w.Apply.Enabled
-}
-
-// Environment returns the GitHub Environment name, defaulting to the workspace name.
 func (w Workspace) Environment() string {
-	if w.Apply.Environment != "" {
-		return w.Apply.Environment
-	}
 	return w.Name
 }
 

@@ -53,7 +53,7 @@ reviewed-plan-is-the-applied-plan property today, without operating anything.
 
 | # | Rel | Verb | Package promoted | First requires | DESIGN |
 |---|---|---|---|---|---|
-| M1 | 0.1 | `tfgh config show` | `internal/config` | GitHub token | §3.1, CONFIG.md |
+| M1 | 0.1 | `tfgh config` | `internal/config` | GitHub token | §3.1, CONFIG.md |
 | M2 | 0.1 | `tfgh scope` | `internal/scope` | ” | §3.2, §4.1 |
 | M3 | 0.1 | `tfgh plan` | `internal/tf`, `internal/plan` | GCP creds, state, TF CLI | §4, §9 |
 | M4 | 0.1 | `tfgh plan --stage` | `internal/store` | buckets, KMS | §5 |
@@ -72,7 +72,7 @@ before anyone provisions anything.
 ### M1 — Find the config
 
 ```
-tfgh config show --repo acme/infra [--config-ref refs/heads/main]
+tfgh config --repo acme/infra [--config-ref refs/heads/main]
 ```
 
 Resolve the trusted ref, fetch `.terraform-on-github.yaml` at *that* ref, parse, validate, print
