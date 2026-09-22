@@ -11,8 +11,8 @@ import (
 type Command struct {
 	Name string
 	Args []string
+	Dir  string // Optional override for the working directory
 }
-
 // Runner handles the execution of Terraform commands within a specific working directory.
 type Runner struct {
 	Dir    string
@@ -33,7 +33,11 @@ func (r *Runner) Run(ctx context.Context, cmd Command) (int, string, error) {
 	defer cancel()
 
 	exe := exec.CommandContext(ctx, "terraform", cmd.Args...)
-	exe.Dir = r.Dir
+	dir := r.Dir
+	if cmd.Dir != "" {
+		dir = cmd.Dir
+	}
+	exe.Dir = dir
 	
 	// We capture combined output for simplicity in the summary, 
 	// though internal/plan might need separation for specific errors.

@@ -25,22 +25,33 @@ func NewPlanner(runner *tf.Runner) *Planner {
 }
 
 // Plan executes the plan lifecycle: init -> plan -> show.
-func (p *Planner) Plan(ctx context.Context) (*PlanResult, error) {
+func (p *Planner) Plan(ctx context.Context, workspaceDir, tfWorkspace string) (*PlanResult, error) {
 	// 1. Init
 	// roadmap L124: init -lock=false
 	exit, out, err := p.Runner.Run(ctx, tf.Command{
 		Name: "init",
 		Args: []string{"init", "-lock=false"},
+		Dir:  workspaceDir,
 	})
 	if err != nil || exit != 0 {
 		return nil, fmt.Errorf("terraform init failed (%d): %s: %w", exit, out, err)
 	}
-
+	if tfWorkspace != "" {
+		exit, out, err := p.Runner.Run(ctx, tf.Command{
+			Name: "workspace select",
+			Args: []string{"workspace", "select", tfWorkspace},
+			Dir:  workspaceDir,
+		})
+		if err != nil || exit != 0 {
+			return nil, fmt.Errorf("terraform workspace select %q failed (%d): %s: %w", tfWorkspace, exit, out, err)
+		}
+	}
 	// 2. Plan
 	// roadmap L124: plan -lock=false -out=tfplan -detailed-exitcode
 	exit, out, err = p.Runner.Run(ctx, tf.Command{
 		Name: "plan",
 		Args: []string{"plan", "-lock=false", "-out=tfplan", "-detailed-exitcode"},
+		Dir:  workspaceDir,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("terraform plan execution failed: %w", err)
@@ -61,6 +72,7 @@ func (p *Planner) Plan(ctx context.Context) (*PlanResult, error) {
 	_, showOut, err := p.Runner.Run(ctx, tf.Command{
 		Name: "show",
 		Args: []string{"show", "tfplan"},
+		Dir:  workspaceDir,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("terraform show failed: %w", err)
