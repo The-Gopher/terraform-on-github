@@ -11,6 +11,10 @@ import (
 	"os"
 	"strings"
 
+	"path/filepath"
+	"github.com/the-gopher/terraform-on-github/internal/plan"
+	"github.com/the-gopher/terraform-on-github/internal/tf"
+	"time"
 	"github.com/the-gopher/terraform-on-github/internal/config"
 	"github.com/the-gopher/terraform-on-github/internal/ghapp"
 	"github.com/the-gopher/terraform-on-github/internal/scope"
@@ -24,6 +28,7 @@ Usage:
 Commands:
   config   Fetch, validate and print a repository's normalized workspace set
   scope    Given a PR, print the workspaces it affects and why
+  plan     List changes for a specific workspace in a PR
 
 Run "tfgh <command> -h" for a command's flags.
 
@@ -43,6 +48,8 @@ func main() {
 		runConfig(args)
 	case "scope":
 		runScope(args)
+	case "plan":
+		runPlan(args)
 	case "help", "-h", "--help":
 		fmt.Print(usage)
 	default:
@@ -154,6 +161,80 @@ func runScope(args []string) {
 		fmt.Printf("- %s [%s]: %s\n", w.Workspace.Name, w.Status, w.Reason)
 	}
 }
+func runPlan(args []string) {
+	fs := flag.NewFlagSet("plan", flag.ExitOnError)
+	repo := fs.String("repo", "", "Repository (owner/repo)")
+	pr := fs.String("pr", "", "PR number")
+	workspace := fs.String("workspace", "", "Workspace name (optional, plans all affected if omitted)")
+	configRef := fs.String("config-ref", "", "Config ref override")
+	configFile := fs.String("config", "", "Path to local config file")
+	root := fs.String("root", ".", "Path to the repository root")
+	if err := fs.Parse(args); err != nil {
+		os.Exit(1)
+	}
+
+	if *repo == "" || *pr == "" {
+		fs.Usage()
+		os.Exit(1)
+	}
+
+	client, owner, repoName := setup(*repo)
+	cfg := loadConfig(context.Background(), client, owner, repoName, *configRef, *configFile, validate)
+
+	scoper := scope.NewScoper(client, cfg)
+	res, err := scoper.Scope(context.Background(), owner, repoName, parsePR(*pr))
+	if err != nil {
+		fatalf("scoping PR: %v", err)
+	}
+
+	var targets []string
+	if *workspace != "" {
+		// Special case: user specified a workspace. We must verify it exists in config.
+		_, ok := cfg.Workspace(*workspace)
+		if !ok {
+			fatalf("workspace %q not found in config", *workspace)
+		}
+		targets = []string{*workspace}
+		// We'll handle the dir separately since targets is just names.
+	} else {
+		for _, w := range res.Workspaces {
+			targets = append(targets, w.Workspace.Name)
+		}
+	}
+	if len(targets) == 0 {
+		fmt.Println("No workspaces in scope to plan.")
+		return
+	}
+
+	runner := tf.NewRunner(*root, 10*time.Minute)
+	planner := plan.NewPlanner(runner)
+
+	for _, wsName := range targets {
+		w, _ := cfg.Workspace(wsName)
+		wsDir := *root
+		if w.Dir != "" {
+			wsDir = filepath.Join(*root, w.Dir)
+		}
+
+		fmt.Printf("--- Planning workspace %q in %s ---\n", wsName, *repo)
+		pRes, pErr := planner.Plan(context.Background(), wsDir, w.TerraformWorkspace)
+		if pErr != nil {
+			fmt.Printf("Verdict: ERROR: %v\n", pErr)
+			continue
+		}
+
+		if pRes.Error != nil {
+			fmt.Printf("Verdict: FAILURE\n%s\n", pRes.Summary)
+			continue
+		}
+
+		status := "NO CHANGES"
+		if pRes.ExitCode == 2 {
+			status = "CHANGES"
+		}
+		fmt.Printf("Verdict: %s\n\n%s\n", status, pRes.Summary)
+	}
+}
 
 // setup validates the shared flags every command takes and builds an authenticated client.
 func setup(repo string) (*ghapp.Client, string, string) {
@@ -222,4 +303,12 @@ func printJSON(v any) {
 func fatalf(format string, args ...any) {
 	fmt.Fprintf(os.Stderr, "Error: "+format+"\n", args...)
 	os.Exit(1)
+}
+func parsePR(s string) int {
+	var pr int
+	_, err := fmt.Sscanf(s, "%d", &pr)
+	if err != nil {
+		return 0
+	}
+	return pr
 }
