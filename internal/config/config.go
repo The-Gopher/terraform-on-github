@@ -146,6 +146,16 @@ type Impersonate struct {
 
 // ApplyPolicy governs what happens after merge.
 type ApplyPolicy struct {
+	// Enabled controls whether apply runs at all. Defaults to true.
+	Enabled bool `yaml:"enabled"`
+
+	// Environment is the GitHub Environment name for deployment protection rules.
+	Environment string `yaml:"environment"`
+
+	// RequireProtectedBase asserts the base branch has protection rules (required reviews, etc).
+	// If false, the workspace is plan-only and apply is skipped.
+	RequireProtectedBase bool `yaml:"require_protected_base"`
+
 	// ApprovalTimeout bounds how long the worker will poll for environment approval. On expiry
 	// the run is abandoned, never applied.
 	ApprovalTimeout Duration `yaml:"approval_timeout"`
@@ -153,7 +163,6 @@ type ApplyPolicy struct {
 	// OnStale decides what to do when the saved plan no longer matches reality. See
 	// DESIGN.md §6.3 — `fail` is the correct default for anything you would page about.
 	OnStale StalePolicy `yaml:"on_stale"`
-
 }
 
 // SummaryDetail controls how much of the plan is rendered into the GitHub check.
