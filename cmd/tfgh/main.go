@@ -12,7 +12,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/hashicorp/terraform-json"
+	tfjson "github.com/hashicorp/terraform-json"
+
 	"github.com/the-gopher/terraform-on-github/internal/config"
 	"github.com/the-gopher/terraform-on-github/internal/ghapp"
 	"github.com/the-gopher/terraform-on-github/internal/scope"
@@ -27,7 +28,7 @@ Usage:
 Commands:
   config   Fetch, validate and print a repository's normalized workspace set
   scope    Given a PR, print the workspaces it affects and why
-  plan     Run terraform plan for a workspace in a PR
+  plan     Run terraform plan for the workspaces a PR affects
 
 Run "tfgh <command> -h" for a command's flags.
 
@@ -118,13 +119,13 @@ func printConfig(w io.Writer, cfg *config.Config) {
 func runScope(args []string) {
 	fs := flag.NewFlagSet("scope", flag.ExitOnError)
 	repo := fs.String("repo", "", "Repository (owner/repo)")
-	prNum := fs.Int("pr", 0, "Pull Request number")
+	pr := fs.String("pr", "", "PR number")
 	configRef := fs.String("config-ref", "", "Config ref override (default refs/heads/main)")
 	configFile := fs.String("config", "", "Path to local config file")
 	jsonOut := fs.Bool("json", false, "Output as JSON")
 	_ = fs.Parse(args)
 
-	if *repo == "" || *prNum == 0 {
+	if *repo == "" || *pr == "" {
 		fatalf("--repo and --pr are required")
 	}
 
@@ -137,7 +138,7 @@ func runScope(args []string) {
 	cfg := loadConfig(ctx, client, owner, repoName, *configRef, *configFile, normalizeOnly)
 
 	scoper := scope.NewScoper(client, cfg)
-	res, err := scoper.Scope(ctx, owner, repoName, *prNum)
+	res, err := scoper.Scope(ctx, owner, repoName, parsePR(*pr))
 	if err != nil {
 		fatalf("scoping PR: %v", err)
 	}
@@ -155,22 +156,30 @@ func runScope(args []string) {
 		fmt.Println("No workspaces in scope.")
 		return
 	}
+
+	for _, w := range res.Workspaces {
+		fmt.Printf("- %s [%s]: %s\n", w.Workspace.Name, w.Status, w.Reason)
+	}
 }
 
-// runPlan implements M3: run terraform plan for a workspace in a PR.
+// runPlan implements M3: run terraform plan for the workspaces a PR affects. With
+// --workspace it plans that one workspace (verified in scope); without it, every
+// workspace the PR touches.
 func runPlan(args []string) {
 	fs := flag.NewFlagSet("plan", flag.ExitOnError)
 	repo := fs.String("repo", "", "Repository (owner/repo)")
-	prNum := fs.Int("pr", 0, "Pull Request number")
-	workspace := fs.String("workspace", "", "Workspace name (required)")
+	pr := fs.String("pr", "", "PR number")
+	workspace := fs.String("workspace", "", "Workspace name (optional, plans all affected if omitted)")
 	configRef := fs.String("config-ref", "", "Config ref override (default refs/heads/main)")
 	configFile := fs.String("config", "", "Path to local config file")
+	root := fs.String("root", ".", "Path to the repository root")
 	stage := fs.String("stage", "", "Directory to write plan artifacts (optional, for local testing)")
-	jsonOut := fs.Bool("json", false, "Output plan summary as JSON")
+	jsonOut := fs.Bool("json", false, "Output plan summaries as JSON")
 	_ = fs.Parse(args)
 
-	if *repo == "" || *prNum == 0 || *workspace == "" {
-		fatalf("--repo, --pr, and --workspace are required")
+	if *repo == "" || *pr == "" {
+		fs.Usage()
+		os.Exit(1)
 	}
 
 	ctx := context.Background()
@@ -178,137 +187,148 @@ func runPlan(args []string) {
 
 	cfg := loadConfig(ctx, client, owner, repoName, *configRef, *configFile, validate)
 
-	ws, ok := cfg.Workspace(*workspace)
-	if !ok {
-		fatalf("workspace %q not found in config", *workspace)
-	}
-
-	// Scope the PR to verify this workspace is affected
 	scoper := scope.NewScoper(client, cfg)
-	res, err := scoper.Scope(ctx, owner, repoName, *prNum)
+	res, err := scoper.Scope(ctx, owner, repoName, parsePR(*pr))
 	if err != nil {
 		fatalf("scoping PR: %v", err)
 	}
 
-	// Check if workspace is in scope
-	found := false
-	for _, w := range res.Workspaces {
-		if w.Workspace.Name == *workspace {
-			found = true
-			break
+	var targets []string
+	if *workspace != "" {
+		ws, ok := cfg.Workspace(*workspace)
+		if !ok {
+			fatalf("workspace %q not found in config", *workspace)
+		}
+		inScope := false
+		for _, w := range res.Workspaces {
+			if w.Workspace.Name == ws.Name {
+				inScope = true
+				break
+			}
+		}
+		if !inScope {
+			fatalf("workspace %q is not in scope for this PR", *workspace)
+		}
+		targets = []string{*workspace}
+	} else {
+		for _, w := range res.Workspaces {
+			targets = append(targets, w.Workspace.Name)
 		}
 	}
-	if !found {
-		fatalf("workspace %q is not in scope for this PR", *workspace)
-	}
-
-	// Get PR to find head SHA for checkout
-	pr, err := client.GetPullRequest(ctx, owner, repoName, *prNum)
-	if err != nil {
-		fatalf("getting PR: %v", err)
-	}
-
-	headSHA := pr.GetHead().GetSHA()
-	if headSHA == "" {
-		fatalf("PR head SHA is empty")
-	}
-
-	// TODO: In M4, we'll use a proper runner with checkout.
-	// For v0.1 CLI, we assume the repo is already checked out locally at the head SHA.
-	// This is a placeholder for the actual checkout logic.
-	workDir := ws.Dir
-	if workDir == "" {
-		workDir = "."
-	}
-
-	// Find terraform binary
-	terraformPath, err := tf.FindTerraformBinary()
-	if err != nil {
-		fatalf("terraform binary not found: %v", err)
-	}
-
-	// Create executor
-	executor := tf.NewExecutor(terraformPath)
-
-	// Prepare backend config
-	backendConfig := map[string]string{
-		"bucket": ws.Backend.Bucket,
-		"prefix": ws.Backend.Prefix,
-	}
-
-	// Init
-	fmt.Fprintf(os.Stderr, "Running terraform init in %s...\n", workDir)
-	if err := executor.Init(ctx, workDir, backendConfig); err != nil {
-		fatalf("terraform init failed: %v", err)
-	}
-
-	// Plan
-	fmt.Fprintf(os.Stderr, "Running terraform plan in %s...\n", workDir)
-	planOpts := tf.PlanOptions{
-		TerraformVersion:     ws.TerraformVersion,
-		PlanTimeout:          ws.PlanTimeout.Duration(),
-		VarFiles:             ws.VarFiles,
-		PlanArgs:             ws.PlanArgs,
-		TerraformWorkspace:   ws.TerraformWorkspace,
-		Lock:                 false,
-		BackendConfig:        backendConfig,
-	}
-
-	result, err := executor.Plan(ctx, workDir, planOpts)
-	if err != nil {
-		fatalf("terraform plan failed: %v", err)
-	}
-
-	// Show plan JSON for summary
-	planJSON, err := executor.ShowPlanJSON(ctx, result.PlanFile)
-	if err != nil {
-		fatalf("terraform show -json failed: %v", err)
-	}
-
-	// Show plan raw for human output
-	planRaw, err := executor.ShowPlanRaw(ctx, result.PlanFile)
-	if err != nil {
-		fatalf("terraform show failed: %v", err)
-	}
-
-	// Build summary based on detail level
-	summary := buildPlanSummary(planJSON, ws.SummaryDetail)
-
-	if *jsonOut {
-		printJSON(map[string]any{
-			"workspace":    ws.Name,
-			"has_changes":  result.HasChanges,
-			"exit_code":    result.ExitCode,
-			"plan_file":    result.PlanFile,
-			"summary":      summary,
-			"plan_raw":     planRaw,
-		})
+	if len(targets) == 0 {
+		fmt.Println("No workspaces in scope to plan.")
 		return
 	}
 
-	// Human-readable output
-	fmt.Printf("Workspace: %s\n", ws.Name)
-	fmt.Printf("Has Changes: %v\n", result.HasChanges)
-	fmt.Printf("Exit Code: %d\n", result.ExitCode)
-	fmt.Printf("Plan File: %s\n", result.PlanFile)
-	fmt.Println()
-	fmt.Println(summary)
-
-	// If stage directory provided, write artifacts
-	if *stage != "" {
-		if err := os.MkdirAll(*stage, 0755); err != nil {
-			fatalf("creating stage directory: %v", err)
-		}
-		if err := os.WriteFile(filepath.Join(*stage, "tfplan"), []byte(planRaw), 0644); err != nil {
-			fatalf("writing plan raw: %v", err)
-		}
-		if planJSONBytes, err := json.MarshalIndent(planJSON, "", "  "); err == nil {
-			if err := os.WriteFile(filepath.Join(*stage, "plan.json"), planJSONBytes, 0644); err != nil {
-				fatalf("writing plan json: %v", err)
-			}
-		}
-		fmt.Fprintf(os.Stderr, "Artifacts written to %s\n", *stage)
+	terraformPath, err := tf.FindTerraformBinary()
+	if err != nil {
+		fatalf("%v", err)
 	}
+	executor := tf.NewExecutor(terraformPath)
+
+	var summaries []map[string]any
+	failed := false
+
+	for _, name := range targets {
+		ws, ok := cfg.Workspace(name)
+		if !ok {
+			fatalf("workspace %q not found in config", name)
+		}
+
+		workDir := *root
+		if ws.Dir != "" {
+			workDir = filepath.Join(*root, ws.Dir)
+		}
+
+		backendConfig := map[string]string{
+			"bucket": ws.Backend.Bucket,
+			"prefix": ws.Backend.Prefix,
+		}
+
+		fmt.Fprintf(os.Stderr, "Running terraform init in %s...\n", workDir)
+		if err := executor.Init(ctx, workDir, backendConfig); err != nil {
+			fatalf("terraform init failed: %v", err)
+		}
+
+		fmt.Fprintf(os.Stderr, "Running terraform plan in %s...\n", workDir)
+		planOpts := tf.PlanOptions{
+			TerraformVersion:   ws.TerraformVersion,
+			PlanTimeout:        ws.PlanTimeout.Duration(),
+			VarFiles:           ws.VarFiles,
+			PlanArgs:           ws.PlanArgs,
+			TerraformWorkspace: ws.TerraformWorkspace,
+			Lock:               false,
+			BackendConfig:      backendConfig,
+		}
+
+		result, err := executor.Plan(ctx, workDir, planOpts)
+		if err != nil {
+			fatalf("terraform plan failed: %v", err)
+		}
+
+		planJSON, err := executor.ShowPlanJSON(ctx, result.PlanFile)
+		if err != nil {
+			fatalf("terraform show -json failed: %v", err)
+		}
+
+		planRaw, err := executor.ShowPlanRaw(ctx, result.PlanFile)
+		if err != nil {
+			fatalf("terraform show failed: %v", err)
+		}
+
+		summary := buildPlanSummary(planJSON, ws.SummaryDetail)
+
+		if *jsonOut {
+			summaries = append(summaries, map[string]any{
+				"workspace":   ws.Name,
+				"has_changes": result.HasChanges,
+				"exit_code":   result.ExitCode,
+				"plan_file":   result.PlanFile,
+				"summary":     summary,
+				"plan_raw":    planRaw,
+			})
+		} else {
+			fmt.Printf("Workspace: %s\n", ws.Name)
+			fmt.Printf("Has Changes: %v\n", result.HasChanges)
+			fmt.Printf("Exit Code: %d\n", result.ExitCode)
+			fmt.Printf("Plan File: %s\n", result.PlanFile)
+			fmt.Println()
+			fmt.Println(summary)
+		}
+
+		if result.ExitCode != 0 && result.ExitCode != 2 {
+			failed = true
+		}
+
+		if *stage != "" {
+			stageOne(ws.Name, planJSON, planRaw, *stage)
+		}
+	}
+
+	if *jsonOut {
+		printJSON(summaries)
+	}
+	if failed {
+		os.Exit(1)
+	}
+}
+
+// stageOne writes one workspace's plan artifacts into the stage directory, namespaced by
+// workspace name so a multi-workspace run does not overwrite itself.
+func stageOne(name string, plan *tfjson.Plan, planRaw, stage string) {
+	dir := filepath.Join(stage, name)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		fatalf("creating stage directory: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "tfplan.txt"), []byte(planRaw), 0644); err != nil {
+		fatalf("writing plan raw: %v", err)
+	}
+	if planJSONBytes, err := json.MarshalIndent(plan, "", "  "); err == nil {
+		if err := os.WriteFile(filepath.Join(dir, "plan.json"), planJSONBytes, 0644); err != nil {
+			fatalf("writing plan json: %v", err)
+		}
+	}
+	fmt.Fprintf(os.Stderr, "Artifacts written to %s\n", dir)
 }
 
 // buildPlanSummary creates a human-readable summary based on detail level.
@@ -384,6 +404,7 @@ func formatFullSummary(plan *tfjson.Plan) string {
 	// For v0.1, same as addresses but we could expand later
 	return formatAddressesSummary(plan)
 }
+
 // setup validates the shared flags every command takes and builds an authenticated client.
 func setup(repo string) (*ghapp.Client, string, string) {
 	token := os.Getenv("GITHUB_TOKEN")
@@ -451,4 +472,14 @@ func printJSON(v any) {
 func fatalf(format string, args ...any) {
 	fmt.Fprintf(os.Stderr, "Error: "+format+"\n", args...)
 	os.Exit(1)
+}
+
+// parsePR accepts a PR number as a string flag value.
+func parsePR(s string) int {
+	var pr int
+	_, err := fmt.Sscanf(s, "%d", &pr)
+	if err != nil {
+		return 0
+	}
+	return pr
 }
