@@ -9,15 +9,15 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 
-	"path/filepath"
-	"github.com/the-gopher/terraform-on-github/internal/plan"
-	"github.com/the-gopher/terraform-on-github/internal/tf"
-	"time"
+	tfjson "github.com/hashicorp/terraform-json"
+
 	"github.com/the-gopher/terraform-on-github/internal/config"
 	"github.com/the-gopher/terraform-on-github/internal/ghapp"
 	"github.com/the-gopher/terraform-on-github/internal/scope"
+	"github.com/the-gopher/terraform-on-github/internal/tf"
 )
 
 const usage = `tfgh — terraform-on-github
@@ -28,7 +28,7 @@ Usage:
 Commands:
   config   Fetch, validate and print a repository's normalized workspace set
   scope    Given a PR, print the workspaces it affects and why
-  plan     List changes for a specific workspace in a PR
+  plan     Run terraform plan for the workspaces a PR affects
 
 Run "tfgh <command> -h" for a command's flags.
 
@@ -119,13 +119,13 @@ func printConfig(w io.Writer, cfg *config.Config) {
 func runScope(args []string) {
 	fs := flag.NewFlagSet("scope", flag.ExitOnError)
 	repo := fs.String("repo", "", "Repository (owner/repo)")
-	prNum := fs.Int("pr", 0, "Pull Request number")
+	pr := fs.String("pr", "", "PR number")
 	configRef := fs.String("config-ref", "", "Config ref override (default refs/heads/main)")
 	configFile := fs.String("config", "", "Path to local config file")
 	jsonOut := fs.Bool("json", false, "Output as JSON")
 	_ = fs.Parse(args)
 
-	if *repo == "" || *prNum == 0 {
+	if *repo == "" || *pr == "" {
 		fatalf("--repo and --pr are required")
 	}
 
@@ -138,7 +138,7 @@ func runScope(args []string) {
 	cfg := loadConfig(ctx, client, owner, repoName, *configRef, *configFile, normalizeOnly)
 
 	scoper := scope.NewScoper(client, cfg)
-	res, err := scoper.Scope(ctx, owner, repoName, *prNum)
+	res, err := scoper.Scope(ctx, owner, repoName, parsePR(*pr))
 	if err != nil {
 		fatalf("scoping PR: %v", err)
 	}
@@ -161,41 +161,55 @@ func runScope(args []string) {
 		fmt.Printf("- %s [%s]: %s\n", w.Workspace.Name, w.Status, w.Reason)
 	}
 }
+
+// runPlan implements M3: run terraform plan for the workspaces a PR affects. With
+// --workspace it plans that one workspace (verified in scope); without it, every
+// workspace the PR touches.
 func runPlan(args []string) {
 	fs := flag.NewFlagSet("plan", flag.ExitOnError)
 	repo := fs.String("repo", "", "Repository (owner/repo)")
 	pr := fs.String("pr", "", "PR number")
 	workspace := fs.String("workspace", "", "Workspace name (optional, plans all affected if omitted)")
-	configRef := fs.String("config-ref", "", "Config ref override")
+	configRef := fs.String("config-ref", "", "Config ref override (default refs/heads/main)")
 	configFile := fs.String("config", "", "Path to local config file")
 	root := fs.String("root", ".", "Path to the repository root")
-	if err := fs.Parse(args); err != nil {
-		os.Exit(1)
-	}
+	stage := fs.String("stage", "", "Directory to write plan artifacts (optional, for local testing)")
+	jsonOut := fs.Bool("json", false, "Output plan summaries as JSON")
+	_ = fs.Parse(args)
 
 	if *repo == "" || *pr == "" {
 		fs.Usage()
 		os.Exit(1)
 	}
 
+	ctx := context.Background()
 	client, owner, repoName := setup(*repo)
-	cfg := loadConfig(context.Background(), client, owner, repoName, *configRef, *configFile, validate)
+
+	cfg := loadConfig(ctx, client, owner, repoName, *configRef, *configFile, validate)
 
 	scoper := scope.NewScoper(client, cfg)
-	res, err := scoper.Scope(context.Background(), owner, repoName, parsePR(*pr))
+	res, err := scoper.Scope(ctx, owner, repoName, parsePR(*pr))
 	if err != nil {
 		fatalf("scoping PR: %v", err)
 	}
 
 	var targets []string
 	if *workspace != "" {
-		// Special case: user specified a workspace. We must verify it exists in config.
-		_, ok := cfg.Workspace(*workspace)
+		ws, ok := cfg.Workspace(*workspace)
 		if !ok {
 			fatalf("workspace %q not found in config", *workspace)
 		}
+		inScope := false
+		for _, w := range res.Workspaces {
+			if w.Workspace.Name == ws.Name {
+				inScope = true
+				break
+			}
+		}
+		if !inScope {
+			fatalf("workspace %q is not in scope for this PR", *workspace)
+		}
 		targets = []string{*workspace}
-		// We'll handle the dir separately since targets is just names.
 	} else {
 		for _, w := range res.Workspaces {
 			targets = append(targets, w.Workspace.Name)
@@ -206,34 +220,189 @@ func runPlan(args []string) {
 		return
 	}
 
-	runner := tf.NewRunner(*root, 10*time.Minute)
-	planner := plan.NewPlanner(runner)
-
-	for _, wsName := range targets {
-		w, _ := cfg.Workspace(wsName)
-		wsDir := *root
-		if w.Dir != "" {
-			wsDir = filepath.Join(*root, w.Dir)
-		}
-
-		fmt.Printf("--- Planning workspace %q in %s ---\n", wsName, *repo)
-		pRes, pErr := planner.Plan(context.Background(), wsDir, w.TerraformWorkspace)
-		if pErr != nil {
-			fmt.Printf("Verdict: ERROR: %v\n", pErr)
-			continue
-		}
-
-		if pRes.Error != nil {
-			fmt.Printf("Verdict: FAILURE\n%s\n", pRes.Summary)
-			continue
-		}
-
-		status := "NO CHANGES"
-		if pRes.ExitCode == 2 {
-			status = "CHANGES"
-		}
-		fmt.Printf("Verdict: %s\n\n%s\n", status, pRes.Summary)
+	terraformPath, err := tf.FindTerraformBinary()
+	if err != nil {
+		fatalf("%v", err)
 	}
+	executor := tf.NewExecutor(terraformPath)
+
+	var summaries []map[string]any
+	failed := false
+
+	for _, name := range targets {
+		ws, ok := cfg.Workspace(name)
+		if !ok {
+			fatalf("workspace %q not found in config", name)
+		}
+
+		workDir := *root
+		if ws.Dir != "" {
+			workDir = filepath.Join(*root, ws.Dir)
+		}
+
+		backendConfig := map[string]string{
+			"bucket": ws.Backend.Bucket,
+			"prefix": ws.Backend.Prefix,
+		}
+
+		fmt.Fprintf(os.Stderr, "Running terraform init in %s...\n", workDir)
+		if err := executor.Init(ctx, workDir, backendConfig); err != nil {
+			fatalf("terraform init failed: %v", err)
+		}
+
+		fmt.Fprintf(os.Stderr, "Running terraform plan in %s...\n", workDir)
+		planOpts := tf.PlanOptions{
+			TerraformVersion:   ws.TerraformVersion,
+			PlanTimeout:        ws.PlanTimeout.Duration(),
+			VarFiles:           ws.VarFiles,
+			PlanArgs:           ws.PlanArgs,
+			TerraformWorkspace: ws.TerraformWorkspace,
+			Lock:               false,
+			BackendConfig:      backendConfig,
+		}
+
+		result, err := executor.Plan(ctx, workDir, planOpts)
+		if err != nil {
+			fatalf("terraform plan failed: %v", err)
+		}
+
+		planJSON, err := executor.ShowPlanJSON(ctx, result.PlanFile)
+		if err != nil {
+			fatalf("terraform show -json failed: %v", err)
+		}
+
+		planRaw, err := executor.ShowPlanRaw(ctx, result.PlanFile)
+		if err != nil {
+			fatalf("terraform show failed: %v", err)
+		}
+
+		summary := buildPlanSummary(planJSON, ws.SummaryDetail)
+
+		if *jsonOut {
+			summaries = append(summaries, map[string]any{
+				"workspace":   ws.Name,
+				"has_changes": result.HasChanges,
+				"exit_code":   result.ExitCode,
+				"plan_file":   result.PlanFile,
+				"summary":     summary,
+				"plan_raw":    planRaw,
+			})
+		} else {
+			fmt.Printf("Workspace: %s\n", ws.Name)
+			fmt.Printf("Has Changes: %v\n", result.HasChanges)
+			fmt.Printf("Exit Code: %d\n", result.ExitCode)
+			fmt.Printf("Plan File: %s\n", result.PlanFile)
+			fmt.Println()
+			fmt.Println(summary)
+		}
+
+		if result.ExitCode != 0 && result.ExitCode != 2 {
+			failed = true
+		}
+
+		if *stage != "" {
+			stageOne(ws.Name, planJSON, planRaw, *stage)
+		}
+	}
+
+	if *jsonOut {
+		printJSON(summaries)
+	}
+	if failed {
+		os.Exit(1)
+	}
+}
+
+// stageOne writes one workspace's plan artifacts into the stage directory, namespaced by
+// workspace name so a multi-workspace run does not overwrite itself.
+func stageOne(name string, plan *tfjson.Plan, planRaw, stage string) {
+	dir := filepath.Join(stage, name)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		fatalf("creating stage directory: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "tfplan.txt"), []byte(planRaw), 0644); err != nil {
+		fatalf("writing plan raw: %v", err)
+	}
+	if planJSONBytes, err := json.MarshalIndent(plan, "", "  "); err == nil {
+		if err := os.WriteFile(filepath.Join(dir, "plan.json"), planJSONBytes, 0644); err != nil {
+			fatalf("writing plan json: %v", err)
+		}
+	}
+	fmt.Fprintf(os.Stderr, "Artifacts written to %s\n", dir)
+}
+
+// buildPlanSummary creates a human-readable summary based on detail level.
+func buildPlanSummary(plan *tfjson.Plan, detail config.SummaryDetail) string {
+	switch detail {
+	case config.SummaryFull:
+		// Full diff - for v0.1 just show resource changes with actions
+		return formatFullSummary(plan)
+	case config.SummaryAddresses:
+		fallthrough
+	default:
+		return formatAddressesSummary(plan)
+	}
+}
+
+// formatAddressesSummary shows only resource addresses and actions.
+func formatAddressesSummary(plan *tfjson.Plan) string {
+	if plan == nil || plan.ResourceChanges == nil {
+		return "No changes."
+	}
+
+	var lines []string
+	for _, rc := range plan.ResourceChanges {
+		action := formatAction(rc.Change.Actions)
+		if action == "no-op" {
+			continue
+		}
+		addr := rc.Address
+		lines = append(lines, fmt.Sprintf("  %s: %s", action, addr))
+	}
+
+	if len(lines) == 0 {
+		return "No changes."
+	}
+
+	return strings.Join(lines, "\n")
+}
+
+// formatAction converts Actions to a human-readable string.
+func formatAction(actions tfjson.Actions) string {
+	if actions.NoOp() {
+		return "no-op"
+	}
+	if actions.Create() {
+		return "create"
+	}
+	if actions.Delete() {
+		return "delete"
+	}
+	if actions.Update() {
+		return "update"
+	}
+	if actions.Replace() {
+		return "replace"
+	}
+	if actions.CreateBeforeDestroy() {
+		return "create_before_destroy"
+	}
+	if actions.DestroyBeforeCreate() {
+		return "destroy_before_create"
+	}
+	if actions.Forget() {
+		return "forget"
+	}
+	if actions.Read() {
+		return "read"
+	}
+	return "unknown"
+}
+
+// formatFullSummary shows full diff (placeholder for v0.1).
+func formatFullSummary(plan *tfjson.Plan) string {
+	// For v0.1, same as addresses but we could expand later
+	return formatAddressesSummary(plan)
 }
 
 // setup validates the shared flags every command takes and builds an authenticated client.
@@ -304,6 +473,8 @@ func fatalf(format string, args ...any) {
 	fmt.Fprintf(os.Stderr, "Error: "+format+"\n", args...)
 	os.Exit(1)
 }
+
+// parsePR accepts a PR number as a string flag value.
 func parsePR(s string) int {
 	var pr int
 	_, err := fmt.Sscanf(s, "%d", &pr)

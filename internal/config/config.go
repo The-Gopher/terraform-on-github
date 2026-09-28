@@ -153,7 +153,6 @@ type ApplyPolicy struct {
 	// OnStale decides what to do when the saved plan no longer matches reality. See
 	// DESIGN.md §6.3 — `fail` is the correct default for anything you would page about.
 	OnStale StalePolicy `yaml:"on_stale"`
-
 }
 
 // SummaryDetail controls how much of the plan is rendered into the GitHub check.

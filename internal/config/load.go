@@ -310,13 +310,40 @@ func (c *Config) validateNoOverlap() []error {
 	for i, a := range c.Workspaces {
 		for _, b := range c.Workspaces[i+1:] {
 			if dirsOverlap(a.Dir, b.Dir) && a.TerraformWorkspace == b.TerraformWorkspace {
-				errs = append(errs, fmt.Errorf(
-					"duplicate workspaces (%q) for dir (%q)",
-					a.TerraformWorkspace, a.Dir))
+				// Only error if branches could both match the same PR base branch
+				if branchPatternsOverlap(a.Branch, b.Branch) {
+					errs = append(errs, fmt.Errorf(
+						"duplicate workspaces (%q) for dir (%q) on overlapping branches (%q and %q)",
+						a.TerraformWorkspace, a.Dir, a.Branch, b.Branch))
+				}
 			}
 		}
 	}
 	return errs
+}
+
+// branchPatternsOverlap checks if two branch glob patterns could match the same branch.
+func branchPatternsOverlap(a, b string) bool {
+	// Exact match
+	if a == b {
+		return true
+	}
+	// If either is a glob that could match the other
+	if matchGlob(a, b) || matchGlob(b, a) {
+		return true
+	}
+	return false
+}
+
+// matchGlob checks if pattern matches name (using simple glob logic).
+func matchGlob(pattern, name string) bool {
+	// Simple check: if pattern has *, it could match
+	if strings.Contains(pattern, "*") {
+		// Convert glob to regex-like check
+		prefix := strings.Split(pattern, "*")[0]
+		return strings.HasPrefix(name, prefix)
+	}
+	return false
 }
 
 // dirsOverlap compares on a path boundary, so "envs/prod" does not overlap "envs/production".
