@@ -34,6 +34,13 @@ type GitHubClient interface {
 type ScopeResults struct {
 	Workspaces    []Result
 	ConfigChanged bool
+
+	// BaseSHA and HeadSHA are the coordinates the plan key composes from (§5):
+	// base is the tip of the base ref resolved now, head is the PR head at
+	// scope time. Staging needs them to key the artifacts; apply verifies
+	// against them again from GitHub (§6.1).
+	BaseSHA string
+	HeadSHA string
 }
 
 func NewScoper(client GitHubClient, cfg *config.Config) *Scoper {
@@ -42,6 +49,7 @@ func NewScoper(client GitHubClient, cfg *config.Config) *Scoper {
 		cfg:    cfg,
 	}
 }
+
 type Scoper struct {
 	client GitHubClient
 	cfg    *config.Config
@@ -97,6 +105,8 @@ func (s *Scoper) Scope(ctx context.Context, owner, repo string, prNumber int) (*
 	return &ScopeResults{
 		Workspaces:    results,
 		ConfigChanged: configChanged,
+		BaseSHA:       baseSHA,
+		HeadSHA:       headSHA,
 	}, nil
 }
 
@@ -159,4 +169,3 @@ func (s *Scoper) deriveStatus(cmp *ghapp.Comparison) Status {
 	}
 	return StatusUpToDate
 }
-
