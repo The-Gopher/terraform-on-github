@@ -22,4 +22,8 @@ type PlanResult struct {
 	PlanFile   string
 	Stdout     string
 	Stderr     string
+
+	// TimedOut distinguishes "plan ran out of time" from "plan failed". Both are errors, but
+	// a timeout is retried with a bigger budget, while a plan failure is a repo problem.
+	TimedOut bool
 }

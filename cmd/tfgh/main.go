@@ -193,6 +193,14 @@ func runPlan(args []string) {
 		fatalf("scoping PR: %v", err)
 	}
 
+	// §4.1: plan only against an up-to-date head. A base that has moved means the plan would
+	// describe a merge that is not the one under review. behind/diverged must rebase first.
+	for _, w := range res.Workspaces {
+		if w.Status == scope.StatusBehind || w.Status == scope.StatusDiverged {
+			fatalf("PR is %s against the base for workspace %q; update the branch and re-plan", w.Status, w.Workspace.Name)
+		}
+	}
+
 	var targets []string
 	if *workspace != "" {
 		ws, ok := cfg.Workspace(*workspace)
@@ -263,6 +271,11 @@ func runPlan(args []string) {
 
 		result, err := executor.Plan(ctx, workDir, planOpts)
 		if err != nil {
+			if result.TimedOut {
+				// §4.3: a timeout is not a plan failure. Report it as one so a bigger
+				// plan_timeout reads as the fix, not "the plan is broken".
+				fatalf("terraform plan timed out after %v (workspace %q); raise plan_timeout and retry", planOpts.PlanTimeout, ws.Name)
+			}
 			fatalf("terraform plan failed: %v", err)
 		}
 
@@ -297,6 +310,8 @@ func runPlan(args []string) {
 		}
 
 		if result.ExitCode != 0 && result.ExitCode != 2 {
+			// Unreachable via the happy path — executor maps 0/2 to success — but a future
+			// caller may pass results through; keep the verdict honest.
 			failed = true
 		}
 

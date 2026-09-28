@@ -3,6 +3,7 @@ package tf
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os/exec"
 	"path/filepath"
@@ -100,7 +101,24 @@ func (e *tfexecExecutor) Plan(ctx context.Context, workDir string, opts PlanOpti
 		HasChanges: hasChanges,
 	}
 
+	// §4.3: 0 = no changes, 2 = changes present, both are success. tfexec folds both into
+	// (bool, nil); anything else is a real failure. Populate ExitCode so callers can report
+	// the distinction instead of a bare bool.
+	result.ExitCode = 1
+	if hasChanges {
+		result.ExitCode = 2
+	} else if err == nil {
+		result.ExitCode = 0
+	}
+
 	if err != nil {
+		// A plan killed by the context deadline is a timeout, not a Terraform failure.
+		// tfexec's cmdErr answers errors.Is for context.DeadlineExceeded; check the
+		// error itself, not just ctx.Err(), so callers can errors.Is the same way.
+		if errors.Is(err, context.DeadlineExceeded) {
+			result.TimedOut = true
+			return result, fmt.Errorf("terraform plan timed out after %v: %w", opts.PlanTimeout, err)
+		}
 		return result, fmt.Errorf("terraform plan: %w", err)
 	}
 
