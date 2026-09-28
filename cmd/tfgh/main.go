@@ -10,11 +10,16 @@ import (
 	"io"
 	"os"
 	"strings"
+	"time"
+
+	kms "cloud.google.com/go/kms/apiv1"
+	"cloud.google.com/go/storage"
 
 	"github.com/the-gopher/terraform-on-github/internal/config"
 	"github.com/the-gopher/terraform-on-github/internal/ghapp"
 	"github.com/the-gopher/terraform-on-github/internal/plan"
 	"github.com/the-gopher/terraform-on-github/internal/scope"
+	"github.com/the-gopher/terraform-on-github/internal/store"
 	"github.com/the-gopher/terraform-on-github/internal/tf"
 )
 
@@ -26,7 +31,7 @@ Usage:
 Commands:
   config   Fetch, validate and print a repository's normalized workspace set
   scope    Given a PR, print the workspaces it affects and why
-  plan     Run terraform plan for the workspaces a PR affects
+  plan     Run terraform plan for the workspaces a PR affects (--stage-gcs to stage §5 artifacts)
 
 Run "tfgh <command> -h" for a command's flags.
 
@@ -172,12 +177,22 @@ func runPlan(args []string) {
 	configFile := fs.String("config", "", "Path to local config file")
 	root := fs.String("root", ".", "Path to the repository root")
 	stage := fs.String("stage", "", "Directory to write plan artifacts (optional, for local testing)")
+	stageGCS := fs.Bool("stage-gcs", false, "Stage artifacts to the §5 GCS buckets and sign meta.json with KMS")
+	plansBucket := fs.String("plans-bucket", "", "Plan-artifact bucket (required with --stage-gcs)")
+	runsBucket := fs.String("runs-bucket", "", "Coordination bucket (required with --stage-gcs)")
+	kmsKey := fs.String("kms-key", "", "KMS cryptoKeyVersion for signing meta.json (required with --stage-gcs)")
 	jsonOut := fs.Bool("json", false, "Output plan summaries as JSON")
 	_ = fs.Parse(args)
 
 	if *repo == "" || *pr == "" {
 		fs.Usage()
 		os.Exit(1)
+	}
+	if *stageGCS && (*plansBucket == "" || *runsBucket == "" || *kmsKey == "") {
+		fatalf("--stage-gcs requires --plans-bucket, --runs-bucket and --kms-key")
+	}
+	if *stageGCS && *stage != "" {
+		fatalf("--stage and --stage-gcs are mutually exclusive")
 	}
 
 	ctx := context.Background()
@@ -186,14 +201,14 @@ func runPlan(args []string) {
 	cfg := loadConfig(ctx, client, owner, repoName, *configRef, *configFile, validate)
 
 	scoper := scope.NewScoper(client, cfg)
-	res, err := scoper.Scope(ctx, owner, repoName, parsePR(*pr))
+	scopeRes, err := scoper.Scope(ctx, owner, repoName, parsePR(*pr))
 	if err != nil {
 		fatalf("scoping PR: %v", err)
 	}
 
 	// §4.1: plan only against an up-to-date head. A base that has moved means the plan would
 	// describe a merge that is not the one under review. behind/diverged must rebase first.
-	for _, w := range res.Workspaces {
+	for _, w := range scopeRes.Workspaces {
 		if w.Status == scope.StatusBehind || w.Status == scope.StatusDiverged {
 			fatalf("PR is %s against the base for workspace %q; update the branch and re-plan", w.Status, w.Workspace.Name)
 		}
@@ -206,7 +221,7 @@ func runPlan(args []string) {
 			fatalf("workspace %q not found in config", *workspace)
 		}
 		inScope := false
-		for _, w := range res.Workspaces {
+		for _, w := range scopeRes.Workspaces {
 			if w.Workspace.Name == ws.Name {
 				inScope = true
 				break
@@ -217,7 +232,7 @@ func runPlan(args []string) {
 		}
 		targets = []string{*workspace}
 	} else {
-		for _, w := range res.Workspaces {
+		for _, w := range scopeRes.Workspaces {
 			targets = append(targets, w.Workspace.Name)
 		}
 	}
@@ -270,6 +285,22 @@ func runPlan(args []string) {
 			}
 			fmt.Fprintf(os.Stderr, "Artifacts written to %s\n", dst)
 		}
+
+		if *stageGCS {
+			headTree, err := client.GetCommitTree(ctx, owner, repoName, scopeRes.HeadSHA)
+			if err != nil {
+				fatalf("resolving head tree: %v", err)
+			}
+			staged, err := stageToGCS(ctx, *plansBucket, *runsBucket, *kmsKey, owner, repoName, parsePR(*pr), ws.Name, headTree, ws.TerraformVersion, res, scopeRes)
+			if err != nil {
+				fatalf("staging %q: %v", ws.Name, err)
+			}
+			if staged.CacheHit {
+				fmt.Fprintf(os.Stderr, "Plan for this (base, head) already staged — reusing artifact (§5.2)\n")
+			} else {
+				fmt.Fprintf(os.Stderr, "Staged %s · run %s\n", staged.MetaKey, staged.RunKey)
+			}
+		}
 	}
 
 	if *jsonOut {
@@ -278,6 +309,48 @@ func runPlan(args []string) {
 	if failed {
 		os.Exit(1)
 	}
+}
+
+// stageToGCS opens the two §5 buckets and the KMS signer, then runs store.Stage
+// for one workspace result. The planned_tree_sha is the head's tree (§4.1): with
+// up-to-dateness enforced, every merge strategy produces the head's tree.
+func stageToGCS(
+	ctx context.Context,
+	plansBucket, runsBucket, kmsKey, owner, repo string,
+	pr int, workspaceName, plannedTreeSHA, terraformVersion string,
+	res plan.WorkspaceResult, scopeRes *scope.ScopeResults,
+) (*store.Staged, error) {
+	gcs, err := storage.NewClient(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("gcs client: %w", err)
+	}
+	defer func() { _ = gcs.Close() }()
+
+	kmsClient, err := kms.NewKeyManagementClient(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("kms client: %w", err)
+	}
+	defer func() { _ = kmsClient.Close() }()
+
+	return store.Stage(ctx,
+		store.NewGCSBucket(gcs.Bucket(plansBucket)),
+		store.NewGCSBucket(gcs.Bucket(runsBucket)),
+		store.NewKMSSigner(kmsClient, kmsKey),
+		res,
+		store.StageInput{
+			Owner:     owner,
+			Repo:      repo,
+			PR:        pr,
+			Workspace: workspaceName,
+			BaseSHA:   scopeRes.BaseSHA,
+			HeadSHA:   scopeRes.HeadSHA,
+			// §4.1: the head already contains base, so the head's tree is the
+			// merge tree under every strategy. Resolving it here (not from the
+			// plan) keeps §6.2's comparison well-defined.
+			PlannedTreeSHA:   plannedTreeSHA,
+			TerraformVersion: terraformVersion,
+			Now:              time.Now(),
+		})
 }
 
 // setup validates the shared flags every command takes and builds an authenticated client.

@@ -91,3 +91,13 @@ func (c *Client) CompareCommits(ctx context.Context, owner, repo, base, head str
 		BehindBy: res.GetBehindBy(),
 	}, nil
 }
+
+// GetCommitTree returns the tree SHA a commit points at. §4.1 makes the head's
+// tree the planned tree; §6.2 compares it against the merge commit's tree.
+func (c *Client) GetCommitTree(ctx context.Context, owner, repo, sha string) (string, error) {
+	commit, _, err := c.gh.Repositories.GetCommit(ctx, owner, repo, sha, nil)
+	if err != nil {
+		return "", fmt.Errorf("failed to get commit %s: %w", sha, err)
+	}
+	return commit.GetCommit().GetTree().GetSHA(), nil
+}
