@@ -4,17 +4,28 @@ package main
 
 import (
 	"context"
+	"crypto"
+	"crypto/ecdsa"
+	"crypto/rsa"
+	"crypto/sha256"
+	"crypto/x509"
+	"encoding/base64"
 	"encoding/json"
+	"encoding/pem"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
+	"math/big"
 	"os"
 	"strings"
 	"time"
 
 	kms "cloud.google.com/go/kms/apiv1"
+	"cloud.google.com/go/kms/apiv1/kmspb"
 	"cloud.google.com/go/storage"
 
+	"github.com/the-gopher/terraform-on-github/internal/apply"
 	"github.com/the-gopher/terraform-on-github/internal/config"
 	"github.com/the-gopher/terraform-on-github/internal/ghapp"
 	"github.com/the-gopher/terraform-on-github/internal/plan"
@@ -32,6 +43,7 @@ Commands:
   config   Fetch, validate and print a repository's normalized workspace set
   scope    Given a PR, print the workspaces it affects and why
   plan     Run terraform plan for the workspaces a PR affects (--stage-gcs to stage §5 artifacts)
+  apply    Verify that a merged PR's plan may be applied ("tfgh apply verify")
 
 Run "tfgh <command> -h" for a command's flags.
 
@@ -53,6 +65,8 @@ func main() {
 		runScope(args)
 	case "plan":
 		runPlan(args)
+	case "apply":
+		runApply(args)
 	case "help", "-h", "--help":
 		fmt.Print(usage)
 	default:
@@ -308,6 +322,134 @@ func runPlan(args []string) {
 	}
 	if failed {
 		os.Exit(1)
+	}
+}
+
+// runApply implements M5: `tfgh apply verify --repo … --pr … --workspace …`.
+// It runs the §6 verification gauntlet against the staged artifact and prints
+// a verdict plus a would-apply summary. It applies nothing and holds no
+// writer identity — the binary mirrors the service boundary (§7): the
+// operator runs terraform apply themselves, with credentials this tool never
+// held.
+func runApply(args []string) {
+	fs := flag.NewFlagSet("apply", flag.ExitOnError)
+	repo := fs.String("repo", "", "Repository (owner/repo)")
+	pr := fs.String("pr", "", "PR number")
+	workspace := fs.String("workspace", "", "Workspace name")
+	configRef := fs.String("config-ref", "", "Config ref override (default refs/heads/main)")
+	plansBucket := fs.String("plans-bucket", "", "Plan-artifact bucket")
+	kmsKey := fs.String("kms-key", "", "KMS cryptoKeyVersion for verifying meta.json (public-key access only)")
+	_ = fs.Parse(args)
+
+	if *repo == "" || *pr == "" || *workspace == "" {
+		fs.Usage()
+		os.Exit(1)
+	}
+	if *plansBucket == "" || *kmsKey == "" {
+		fatalf("apply verify requires --plans-bucket and --kms-key")
+	}
+
+	ctx := context.Background()
+	client, owner, repoName := setup(*repo)
+
+	// The base/head SHAs key the artifact (§5); resolve them from GitHub now,
+	// exactly as the plan side did — never from a stored pointer (§6.1).
+	prNum := parsePR(*pr)
+	pull, err := client.GetApplyPullRequest(ctx, owner, repoName, prNum)
+	if err != nil {
+		fatalf("reading PR %s: %v", *pr, err)
+	}
+	if pull.HeadSHA == "" {
+		fatalf("PR %s has no head SHA", *pr)
+	}
+	// The artifact key composes from the base SHA the plan side scoped against
+	// — the tip of the base ref at plan time. Re-derive it the same way rather
+	// than trusting any pointer (§6.1).
+	baseSHA, err := client.ResolveRef(ctx, owner, repoName, pull.BaseRef)
+	if err != nil {
+		fatalf("resolving base ref: %v", err)
+	}
+
+	gcs, err := storage.NewClient(ctx)
+	if err != nil {
+		fatalf("gcs client: %v", err)
+	}
+	defer func() { _ = gcs.Close() }()
+
+	kmsClient, err := kms.NewKeyManagementClient(ctx)
+	if err != nil {
+		fatalf("kms client: %v", err)
+	}
+	defer func() { _ = kmsClient.Close() }()
+
+	v := &apply.Verifier{
+		GitHub:    client,
+		Artifacts: store.NewGCSBucket(gcs.Bucket(*plansBucket)),
+		KMS:       &kmsVerifier{client: kmsClient, keyName: *kmsKey},
+		Trusted:   client,
+		ConfigRef: *configRef,
+	}
+
+	verdict, err := v.Verify(ctx, owner, repoName, prNum, *workspace, baseSHA, pull.HeadSHA)
+	if err != nil {
+		if verdict.Reason != "" {
+			fmt.Fprintf(os.Stderr, "NOT APPLICABLE: %s\n", verdict.Reason)
+		}
+		fatalf("%v", err)
+	}
+
+	fmt.Println(apply.WouldApply(verdict, *workspace, 0))
+}
+
+// kmsVerifier verifies the KMS signature locally: it fetches the key version's
+// public key (publicKeyViewer — the only KMS grant the apply side holds, §7.2)
+// and verifies the ECDSA/RSA signature in-process. There is no AsymmetricVerify
+// RPC; KMS signs, the client verifies against the fetched PEM.
+type kmsVerifier struct {
+	client  *kms.KeyManagementClient
+	keyName string
+}
+
+// Verify checks a base64 signature over the SHA-256 of digest.
+func (v *kmsVerifier) Verify(ctx context.Context, digest []byte, signature string) error {
+	sig, err := base64.StdEncoding.DecodeString(signature)
+	if err != nil {
+		return fmt.Errorf("decoding signature: %w", err)
+	}
+	pub, err := v.client.GetPublicKey(ctx, &kmspb.GetPublicKeyRequest{Name: v.keyName})
+	if err != nil {
+		return fmt.Errorf("kms get public key: %w", err)
+	}
+	block, _ := pem.Decode([]byte(pub.GetPem()))
+	if block == nil {
+		return errors.New("kms public key is not valid PEM")
+	}
+	parsed, err := x509.ParsePKIXPublicKey(block.Bytes)
+	if err != nil {
+		return fmt.Errorf("parsing kms public key: %w", err)
+	}
+	keySum := sha256.Sum256(digest)
+	switch key := parsed.(type) {
+	case *ecdsa.PublicKey:
+		// KMS encodes EC signatures as the IEEE P1363 r||s concatenation, each
+		// half the coordinate size — not ASN.1.
+		size := (key.Params().N.BitLen() + 7) / 8
+		if len(sig) != 2*size {
+			return fmt.Errorf("ecdsa signature is %d bytes, want %d (r||s)", len(sig), 2*size)
+		}
+		r := new(big.Int).SetBytes(sig[:size])
+		s := new(big.Int).SetBytes(sig[size:])
+		if !ecdsa.Verify(key, keySum[:], r, s) {
+			return errors.New("ecdsa signature does not verify")
+		}
+		return nil
+	case *rsa.PublicKey:
+		if err := rsa.VerifyPKCS1v15(key, crypto.SHA256, keySum[:], sig); err != nil {
+			return fmt.Errorf("rsa signature does not verify: %w", err)
+		}
+		return nil
+	default:
+		return fmt.Errorf("unsupported kms key type %T", parsed)
 	}
 }
 

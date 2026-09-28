@@ -7,6 +7,8 @@ import (
 
 	"github.com/google/go-github/v60/github"
 	"golang.org/x/oauth2"
+
+	"github.com/the-gopher/terraform-on-github/internal/apply"
 )
 
 // Client implements config.ContentsReader.
@@ -46,6 +48,12 @@ func (c *Client) GetContents(ctx context.Context, owner, repo, path, ref string)
 	return []byte(content), nil
 }
 
+// ReadFileAtSHA implements config.ContentsReader: reads a path at an exact
+// commit SHA, which is what the trusted-ref loader reads at.
+func (c *Client) ReadFileAtSHA(ctx context.Context, owner, repo, path, sha string) ([]byte, error) {
+	return c.GetContents(ctx, owner, repo, path, sha)
+}
+
 // normalizeRef expands a bare branch name into a fully qualified ref. The
 // GitHub refs API only accepts qualified refs (heads/main, tags/v1), but PR
 // payloads carry bare branch names.
@@ -66,12 +74,45 @@ func (c *Client) ResolveRef(ctx context.Context, owner, repo, ref string) (strin
 	return refObj.GetObject().GetSHA(), nil
 }
 
+// BaseRefResolution resolves a PR's base ref to its current tip — the same
+// resolution §3.2 scoping does, so the artifact key composes from the same
+// base SHA the plan side used.
+func (c *Client) ResolveBaseRef(ctx context.Context, owner, repo string, pr *github.PullRequest) (string, error) {
+	return c.ResolveRef(ctx, owner, repo, pr.GetBase().GetRef())
+}
+
 func (c *Client) GetPullRequest(ctx context.Context, owner, repo string, number int) (*github.PullRequest, error) {
 	pr, _, err := c.gh.PullRequests.Get(ctx, owner, repo, number)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get PR %d: %w", number, err)
 	}
 	return pr, nil
+}
+
+// GetApplyPullRequest fetches a PR and returns it in apply.PullRequest shape,
+// satisfying apply.GitHubClient.
+func (c *Client) GetApplyPullRequest(ctx context.Context, owner, repo string, number int) (apply.PullRequest, error) {
+	pr, err := c.GetPullRequest(ctx, owner, repo, number)
+	if err != nil {
+		return apply.PullRequest{}, err
+	}
+	return apply.PullRequest{
+		Merged:         pr.GetMerged(),
+		MergeCommitSHA: pr.GetMergeCommitSHA(),
+		BaseRef:        pr.GetBase().GetRef(),
+		BaseSHA:        pr.GetBase().GetSHA(),
+		HeadSHA:        pr.GetHead().GetSHA(),
+	}, nil
+}
+
+// ApplyPullRequestState adapts a *github.PullRequest to apply.PullRequest.
+func (c *Client) ApplyPullRequestState(pr *github.PullRequest) apply.PullRequest {
+	return apply.PullRequest{
+		Merged:         pr.GetMerged(),
+		MergeCommitSHA: pr.GetMergeCommitSHA(),
+		BaseSHA:        pr.GetBase().GetSHA(),
+		HeadSHA:        pr.GetHead().GetSHA(),
+	}
 }
 
 type Comparison struct {
@@ -100,4 +141,18 @@ func (c *Client) GetCommitTree(ctx context.Context, owner, repo, sha string) (st
 		return "", fmt.Errorf("failed to get commit %s: %w", sha, err)
 	}
 	return commit.GetCommit().GetTree().GetSHA(), nil
+}
+
+// CommitParents returns a commit's parent SHAs, first-parent first — §6.1's
+// `merge_commit^1 == base_sha` assertion reads parents[0].
+func (c *Client) CommitParents(ctx context.Context, owner, repo, sha string) ([]string, error) {
+	commit, _, err := c.gh.Repositories.GetCommit(ctx, owner, repo, sha, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get commit %s: %w", sha, err)
+	}
+	parents := make([]string, 0, len(commit.Parents))
+	for _, p := range commit.Parents {
+		parents = append(parents, p.GetSHA())
+	}
+	return parents, nil
 }
