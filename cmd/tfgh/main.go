@@ -331,78 +331,9 @@ func stageOne(name string, plan *tfjson.Plan, planRaw, stage string) {
 	fmt.Fprintf(os.Stderr, "Artifacts written to %s\n", dir)
 }
 
-// buildPlanSummary creates a human-readable summary based on detail level.
+// buildPlanSummary renders the plan summary via internal/tf, shared with the M6 worker.
 func buildPlanSummary(plan *tfjson.Plan, detail config.SummaryDetail) string {
-	switch detail {
-	case config.SummaryFull:
-		// Full diff - for v0.1 just show resource changes with actions
-		return formatFullSummary(plan)
-	case config.SummaryAddresses:
-		fallthrough
-	default:
-		return formatAddressesSummary(plan)
-	}
-}
-
-// formatAddressesSummary shows only resource addresses and actions.
-func formatAddressesSummary(plan *tfjson.Plan) string {
-	if plan == nil || plan.ResourceChanges == nil {
-		return "No changes."
-	}
-
-	var lines []string
-	for _, rc := range plan.ResourceChanges {
-		action := formatAction(rc.Change.Actions)
-		if action == "no-op" {
-			continue
-		}
-		addr := rc.Address
-		lines = append(lines, fmt.Sprintf("  %s: %s", action, addr))
-	}
-
-	if len(lines) == 0 {
-		return "No changes."
-	}
-
-	return strings.Join(lines, "\n")
-}
-
-// formatAction converts Actions to a human-readable string.
-func formatAction(actions tfjson.Actions) string {
-	if actions.NoOp() {
-		return "no-op"
-	}
-	if actions.Create() {
-		return "create"
-	}
-	if actions.Delete() {
-		return "delete"
-	}
-	if actions.Update() {
-		return "update"
-	}
-	if actions.Replace() {
-		return "replace"
-	}
-	if actions.CreateBeforeDestroy() {
-		return "create_before_destroy"
-	}
-	if actions.DestroyBeforeCreate() {
-		return "destroy_before_create"
-	}
-	if actions.Forget() {
-		return "forget"
-	}
-	if actions.Read() {
-		return "read"
-	}
-	return "unknown"
-}
-
-// formatFullSummary shows full diff (placeholder for v0.1).
-func formatFullSummary(plan *tfjson.Plan) string {
-	// For v0.1, same as addresses but we could expand later
-	return formatAddressesSummary(plan)
+	return tf.BuildPlanSummary(plan, detail)
 }
 
 // setup validates the shared flags every command takes and builds an authenticated client.
