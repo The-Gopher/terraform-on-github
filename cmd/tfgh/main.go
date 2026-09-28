@@ -9,13 +9,11 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 	"strings"
-
-	tfjson "github.com/hashicorp/terraform-json"
 
 	"github.com/the-gopher/terraform-on-github/internal/config"
 	"github.com/the-gopher/terraform-on-github/internal/ghapp"
+	"github.com/the-gopher/terraform-on-github/internal/plan"
 	"github.com/the-gopher/terraform-on-github/internal/scope"
 	"github.com/the-gopher/terraform-on-github/internal/tf"
 )
@@ -193,6 +191,14 @@ func runPlan(args []string) {
 		fatalf("scoping PR: %v", err)
 	}
 
+	// §4.1: plan only against an up-to-date head. A base that has moved means the plan would
+	// describe a merge that is not the one under review. behind/diverged must rebase first.
+	for _, w := range res.Workspaces {
+		if w.Status == scope.StatusBehind || w.Status == scope.StatusDiverged {
+			fatalf("PR is %s against the base for workspace %q; update the branch and re-plan", w.Status, w.Workspace.Name)
+		}
+	}
+
 	var targets []string
 	if *workspace != "" {
 		ws, ok := cfg.Workspace(*workspace)
@@ -226,7 +232,7 @@ func runPlan(args []string) {
 	}
 	executor := tf.NewExecutor(terraformPath)
 
-	var summaries []map[string]any
+	var results []plan.WorkspaceResult
 	failed := false
 
 	for _, name := range targets {
@@ -235,105 +241,43 @@ func runPlan(args []string) {
 			fatalf("workspace %q not found in config", name)
 		}
 
-		workDir := *root
-		if ws.Dir != "" {
-			workDir = filepath.Join(*root, ws.Dir)
-		}
-
-		backendConfig := map[string]string{
-			"bucket": ws.Backend.Bucket,
-			"prefix": ws.Backend.Prefix,
-		}
-
-		fmt.Fprintf(os.Stderr, "Running terraform init in %s...\n", workDir)
-		if err := executor.Init(ctx, workDir, backendConfig); err != nil {
-			fatalf("terraform init failed: %v", err)
-		}
-
-		fmt.Fprintf(os.Stderr, "Running terraform plan in %s...\n", workDir)
-		planOpts := tf.PlanOptions{
-			TerraformVersion:   ws.TerraformVersion,
-			PlanTimeout:        ws.PlanTimeout.Duration(),
-			VarFiles:           ws.VarFiles,
-			PlanArgs:           ws.PlanArgs,
-			TerraformWorkspace: ws.TerraformWorkspace,
-			Lock:               false,
-			BackendConfig:      backendConfig,
-		}
-
-		result, err := executor.Plan(ctx, workDir, planOpts)
+		fmt.Fprintf(os.Stderr, "Planning workspace %q...\n", ws.Name)
+		res, err := plan.Run(ctx, executor, ws, *root)
 		if err != nil {
-			fatalf("terraform plan failed: %v", err)
+			// A timeout is not a plan failure: the fix is a bigger budget, not the repo.
+			fatalf("%v (workspace %q)", err, ws.Name)
 		}
-
-		planJSON, err := executor.ShowPlanJSON(ctx, result.PlanFile)
-		if err != nil {
-			fatalf("terraform show -json failed: %v", err)
-		}
-
-		planRaw, err := executor.ShowPlanRaw(ctx, result.PlanFile)
-		if err != nil {
-			fatalf("terraform show failed: %v", err)
-		}
-
-		summary := buildPlanSummary(planJSON, ws.SummaryDetail)
 
 		if *jsonOut {
-			summaries = append(summaries, map[string]any{
-				"workspace":   ws.Name,
-				"has_changes": result.HasChanges,
-				"exit_code":   result.ExitCode,
-				"plan_file":   result.PlanFile,
-				"summary":     summary,
-				"plan_raw":    planRaw,
-			})
+			results = append(results, res)
 		} else {
-			fmt.Printf("Workspace: %s\n", ws.Name)
-			fmt.Printf("Has Changes: %v\n", result.HasChanges)
-			fmt.Printf("Exit Code: %d\n", result.ExitCode)
-			fmt.Printf("Plan File: %s\n", result.PlanFile)
+			fmt.Printf("Workspace: %s\n", res.Workspace)
+			fmt.Printf("Has Changes: %v\n", res.HasChanges)
+			fmt.Printf("Exit Code: %d\n", res.ExitCode)
+			fmt.Printf("Plan File: %s\n", res.PlanFile)
 			fmt.Println()
-			fmt.Println(summary)
+			fmt.Println(res.Summary)
 		}
 
-		if result.ExitCode != 0 && result.ExitCode != 2 {
+		if res.Failed() {
 			failed = true
 		}
 
 		if *stage != "" {
-			stageOne(ws.Name, planJSON, planRaw, *stage)
+			dst, err := res.Stage(*stage)
+			if err != nil {
+				fatalf("%v", err)
+			}
+			fmt.Fprintf(os.Stderr, "Artifacts written to %s\n", dst)
 		}
 	}
 
 	if *jsonOut {
-		printJSON(summaries)
+		printJSON(results)
 	}
 	if failed {
 		os.Exit(1)
 	}
-}
-
-// stageOne writes one workspace's plan artifacts into the stage directory, namespaced by
-// workspace name so a multi-workspace run does not overwrite itself.
-func stageOne(name string, plan *tfjson.Plan, planRaw, stage string) {
-	dir := filepath.Join(stage, name)
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		fatalf("creating stage directory: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, "tfplan.txt"), []byte(planRaw), 0644); err != nil {
-		fatalf("writing plan raw: %v", err)
-	}
-	if planJSONBytes, err := json.MarshalIndent(plan, "", "  "); err == nil {
-		if err := os.WriteFile(filepath.Join(dir, "plan.json"), planJSONBytes, 0644); err != nil {
-			fatalf("writing plan json: %v", err)
-		}
-	}
-	fmt.Fprintf(os.Stderr, "Artifacts written to %s\n", dir)
-}
-
-// buildPlanSummary renders the plan summary via internal/tf, shared with the M6 worker.
-func buildPlanSummary(plan *tfjson.Plan, detail config.SummaryDetail) string {
-	return tf.BuildPlanSummary(plan, detail)
 }
 
 // setup validates the shared flags every command takes and builds an authenticated client.
