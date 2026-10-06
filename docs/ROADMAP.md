@@ -72,16 +72,16 @@ before anyone provisions anything.
 ### M1 — Find the config
 
 ```
-tfgh config --repo acme/infra [--config-ref refs/heads/main]
+tfgh config --repo acme/infra [--config-ref refs/heads/main] [--config <path>]
 ```
 
 Resolve the trusted ref, fetch `.terraform-on-github.yaml` at *that* ref, parse, validate, print
-the normalized workspace set.
+the normalized workspace set. Non-mutating verbs support a `--config <path>` flag to override the fetched file.
 
 **Done when** every validation rule in CONFIG.md has a fixture that fails for the stated reason —
 including the two that are really design decisions in disguise: a non-exact `terraform_version`,
 and `on_stale: replan_if_equivalent`, which must be rejected *with its explanation* rather than
-silently ignored. The example YAML round-trips.
+silently ignored. The example YAML round-trips; local config overrides are verified for all read-only verbs.
 
 **What it forces you to decide.** §3.1 puts `config_ref` in `deploy/`, which will not exist for
 months. The CLI needs it now, so v1 starts with a local registry file that `deploy/` later
