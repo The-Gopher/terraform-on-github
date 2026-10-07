@@ -2,14 +2,10 @@ package store
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
 
-	kms "cloud.google.com/go/kms/apiv1"
-	"cloud.google.com/go/kms/apiv1/kmspb"
 	"cloud.google.com/go/storage"
 	"google.golang.org/api/iterator"
 	"google.golang.org/grpc/codes"
@@ -59,7 +55,7 @@ func (b *GCSBucket) Read(ctx context.Context, name string) ([]byte, int64, error
 		return nil, 0, translate(err, name)
 	}
 	defer func() { _ = r.Close() }()
-	content, err := readAll(r)
+	content, err := io.ReadAll(r)
 	if err != nil {
 		return nil, 0, fmt.Errorf("reading %s: %w", name, err)
 	}
@@ -107,38 +103,4 @@ func translate(err error, name string) error {
 	default:
 		return fmt.Errorf("%s: %w", name, err)
 	}
-}
-
-func readAll(r io.Reader) ([]byte, error) {
-	return io.ReadAll(r)
-}
-
-// KMSSigner signs the meta digest with a Cloud KMS asymmetric key. The plan
-// service holds cloudkms.signer on this key and nothing more (§7.1); the apply
-// side verifies via publicKeyViewer.
-type KMSSigner struct {
-	client  *kms.KeyManagementClient
-	keyName string // projects/p/locations/l/keyRings/r/cryptoKeys/k/cryptoKeyVersions/v
-}
-
-// NewKMSSigner wraps a KMS client and fully-qualified key version.
-func NewKMSSigner(client *kms.KeyManagementClient, keyName string) *KMSSigner {
-	return &KMSSigner{client: client, keyName: keyName}
-}
-
-// Sign implements Signer. KMS wants a pre-hashed SHA-256 digest, which is
-// exactly what Meta.Digest plus one hash round gives; the key version's
-// algorithm selects SHA-256 by key configuration, not by request field.
-func (s *KMSSigner) Sign(ctx context.Context, digest []byte) (string, error) {
-	sum := sha256.Sum256(digest)
-	resp, err := s.client.AsymmetricSign(ctx, &kmspb.AsymmetricSignRequest{
-		Name: s.keyName,
-		Digest: &kmspb.Digest{
-			Digest: &kmspb.Digest_Sha256{Sha256: sum[:]},
-		},
-	})
-	if err != nil {
-		return "", fmt.Errorf("kms sign: %w", err)
-	}
-	return base64.StdEncoding.EncodeToString(resp.Signature), nil
 }

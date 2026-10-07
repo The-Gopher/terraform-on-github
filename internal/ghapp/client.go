@@ -1,3 +1,5 @@
+// Package ghapp is the GitHub API adapter: it implements the narrow client interfaces that
+// config, scope and apply declare, over go-github.
 package ghapp
 
 import (
@@ -11,11 +13,14 @@ import (
 	"github.com/the-gopher/terraform-on-github/internal/apply"
 )
 
-// Client implements config.ContentsReader.
+// Client is an authenticated GitHub API client. It implements config.ContentsReader,
+// scope.GitHubClient and apply.GitHubClient.
 type Client struct {
 	gh *github.Client
 }
 
+// NewClient returns a Client that authenticates with a static token. ctx is used only to
+// build the underlying HTTP client.
 func NewClient(ctx context.Context, token string) *Client {
 	ts := oauth2.StaticTokenSource(
 		&oauth2.Token{AccessToken: token},
@@ -26,6 +31,7 @@ func NewClient(ctx context.Context, token string) *Client {
 	}
 }
 
+// GetContents returns the content of the file at path in repo at ref.
 func (c *Client) GetContents(ctx context.Context, owner, repo, path, ref string) ([]byte, error) {
 	file, _, resp, err := c.gh.Repositories.GetContents(ctx, owner, repo, path, &github.RepositoryContentGetOptions{
 		Ref: ref,
@@ -66,25 +72,27 @@ func normalizeRef(ref string) string {
 	}
 }
 
+// ResolveRef returns the commit SHA ref currently points at. A bare branch name is accepted.
 func (c *Client) ResolveRef(ctx context.Context, owner, repo, ref string) (string, error) {
 	refObj, _, err := c.gh.Git.GetRef(ctx, owner, repo, normalizeRef(ref))
 	if err != nil {
-		return "", fmt.Errorf("failed to resolve ref %q: %w", ref, err)
+		return "", fmt.Errorf("resolve ref %q: %w", ref, err)
 	}
 	return refObj.GetObject().GetSHA(), nil
 }
 
-// BaseRefResolution resolves a PR's base ref to its current tip — the same
+// ResolveBaseRef resolves a PR's base ref to its current tip — the same
 // resolution §3.2 scoping does, so the artifact key composes from the same
 // base SHA the plan side used.
 func (c *Client) ResolveBaseRef(ctx context.Context, owner, repo string, pr *github.PullRequest) (string, error) {
 	return c.ResolveRef(ctx, owner, repo, pr.GetBase().GetRef())
 }
 
+// GetPullRequest returns PR number in repo.
 func (c *Client) GetPullRequest(ctx context.Context, owner, repo string, number int) (*github.PullRequest, error) {
 	pr, _, err := c.gh.PullRequests.Get(ctx, owner, repo, number)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get PR %d: %w", number, err)
+		return nil, fmt.Errorf("get PR %d: %w", number, err)
 	}
 	return pr, nil
 }
@@ -115,16 +123,19 @@ func (c *Client) ApplyPullRequestState(pr *github.PullRequest) apply.PullRequest
 	}
 }
 
+// Comparison is the result of comparing two commits: the files changed between them and how
+// far head is ahead of and behind base.
 type Comparison struct {
 	Files    []*github.CommitFile
 	AheadBy  int
 	BehindBy int
 }
 
+// CompareCommits compares base...head.
 func (c *Client) CompareCommits(ctx context.Context, owner, repo, base, head string) (*Comparison, error) {
 	res, _, err := c.gh.Repositories.CompareCommits(ctx, owner, repo, base, head, nil)
 	if err != nil {
-		return nil, fmt.Errorf("failed to compare %s...%s: %w", base, head, err)
+		return nil, fmt.Errorf("compare %s...%s: %w", base, head, err)
 	}
 	return &Comparison{
 		Files:    res.Files,
@@ -138,7 +149,7 @@ func (c *Client) CompareCommits(ctx context.Context, owner, repo, base, head str
 func (c *Client) GetCommitTree(ctx context.Context, owner, repo, sha string) (string, error) {
 	commit, _, err := c.gh.Repositories.GetCommit(ctx, owner, repo, sha, nil)
 	if err != nil {
-		return "", fmt.Errorf("failed to get commit %s: %w", sha, err)
+		return "", fmt.Errorf("get commit %s: %w", sha, err)
 	}
 	return commit.GetCommit().GetTree().GetSHA(), nil
 }
@@ -148,7 +159,7 @@ func (c *Client) GetCommitTree(ctx context.Context, owner, repo, sha string) (st
 func (c *Client) CommitParents(ctx context.Context, owner, repo, sha string) ([]string, error) {
 	commit, _, err := c.gh.Repositories.GetCommit(ctx, owner, repo, sha, nil)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get commit %s: %w", sha, err)
+		return nil, fmt.Errorf("get commit %s: %w", sha, err)
 	}
 	parents := make([]string, 0, len(commit.Parents))
 	for _, p := range commit.Parents {

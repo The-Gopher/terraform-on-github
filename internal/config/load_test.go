@@ -1,11 +1,14 @@
 package config
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"gopkg.in/yaml.v3"
 )
 
 // exampleConfig is the file shipped at the repo root, so the worked example and the parser cannot
@@ -64,6 +67,52 @@ func TestDurationAcceptsCompoundForm(t *testing.T) {
 	}
 }
 
+func TestDurationRejectsBadValues(t *testing.T) {
+	for _, tc := range []struct{ value, want string }{
+		{"30", "is not a duration"}, // a bare number has no unit
+		{"soon", "is not a duration"},
+		{"-5m", "is negative"},
+	} {
+		t.Run(tc.value, func(t *testing.T) {
+			_, err := Parse(withReplacement(t, "plan_timeout: 20m", "plan_timeout: "+tc.value))
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("err = %v, want it to contain %q", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestDurationRoundTrips(t *testing.T) {
+	in := struct {
+		D Duration `yaml:"d" json:"d"`
+	}{D: Duration(20 * time.Minute)}
+
+	y, err := yaml.Marshal(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.TrimSpace(string(y)); got != "d: 20m0s" {
+		t.Errorf("yaml = %q, want %q", got, "d: 20m0s")
+	}
+	j, err := json.Marshal(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := string(j); got != `{"d":"20m0s"}` {
+		t.Errorf("json = %s, want {\"d\":\"20m0s\"}", got)
+	}
+
+	var back struct {
+		D Duration `yaml:"d"`
+	}
+	if err := yaml.Unmarshal(y, &back); err != nil {
+		t.Fatal(err)
+	}
+	if back.D != in.D {
+		t.Errorf("round trip = %s, want %s", back.D, in.D)
+	}
+}
+
 func TestDefaultsInheritAndOverride(t *testing.T) {
 	c, err := ParseAndValidate(exampleConfig(t))
 	if err != nil {
@@ -90,13 +139,13 @@ func TestApplyDefaults(t *testing.T) {
 	}
 }
 
-func withReplacement(t *testing.T, old, new string) []byte {
+func withReplacement(t *testing.T, from, to string) []byte {
 	t.Helper()
 	s := string(exampleConfig(t))
-	if !strings.Contains(s, old) {
-		t.Fatalf("example config no longer contains %q; update this test", old)
+	if !strings.Contains(s, from) {
+		t.Fatalf("example config no longer contains %q; update this test", from)
 	}
-	return []byte(strings.Replace(s, old, new, 1))
+	return []byte(strings.Replace(s, from, to, 1))
 }
 
 func TestRejects(t *testing.T) {

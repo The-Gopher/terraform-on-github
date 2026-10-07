@@ -6,10 +6,10 @@ package plan
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
-	"time"
 
 	tfjson "github.com/hashicorp/terraform-json"
 
@@ -33,40 +33,36 @@ type WorkspaceResult struct {
 
 // Stage writes the workspace's artifacts to dir/ as the §5 staging skeleton: tfplan.txt
 // (human) and plan.json (machine). M4 replaces the layout with the GCS key and KMS
-// signature; the local write stays for the CLI's --stage path.
+// signature; the local write stays for the CLI's --stage path. A plan can carry secrets, so
+// the files are owner-only.
 func (r WorkspaceResult) Stage(dir string) (string, error) {
 	dst := filepath.Join(dir, r.Workspace)
-	if err := os.MkdirAll(dst, 0755); err != nil {
+	if err := os.MkdirAll(dst, 0o750); err != nil {
 		return "", fmt.Errorf("creating stage directory: %w", err)
 	}
-	if err := os.WriteFile(filepath.Join(dst, "tfplan.txt"), []byte(r.PlanRaw), 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(dst, "tfplan.txt"), []byte(r.PlanRaw), 0o600); err != nil {
 		return "", fmt.Errorf("writing plan raw: %w", err)
 	}
 	raw, err := json.MarshalIndent(r.PlanJSON, "", "  ")
 	if err != nil {
 		return "", fmt.Errorf("encoding plan json: %w", err)
 	}
-	if err := os.WriteFile(filepath.Join(dst, "plan.json"), raw, 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(dst, "plan.json"), raw, 0o600); err != nil {
 		return "", fmt.Errorf("writing plan json: %w", err)
 	}
 	return dst, nil
 }
 
-// Error distinguishes the two ways a plan goes wrong: a timeout is a retry with a bigger
-// budget; anything else is a repo problem. Exit codes 0 and 2 are both success (§4.3).
+// Failed reports whether terraform plan exited unsuccessfully. Exit codes 0 (no changes) and
+// 2 (changes present) are both success (§4.3).
 func (r WorkspaceResult) Failed() bool {
 	return r.ExitCode != 0 && r.ExitCode != 2
 }
 
-// TimeoutError is the error Run returns when plan_timeout fires; it wraps
-// tf.ErrPlanTimeout so callers can errors.Is the verdict.
-func TimeoutError(timeout time.Duration) error {
-	return fmt.Errorf("%w after %v; raise plan_timeout and retry", tf.ErrPlanTimeout, timeout)
-}
-
 // Run plans one workspace end to end: init (GCS backend), plan (-lock=false -out=tfplan,
 // -detailed-exitcode semantics live in the executor), then show -json and show. A timeout
-// surfaces as a distinct error rather than a plan failure.
+// returns an error wrapping tf.ErrPlanTimeout: a timeout is a retry with a bigger budget,
+// anything else is a repo problem.
 func Run(ctx context.Context, executor tf.Executor, ws config.Workspace, root string) (WorkspaceResult, error) {
 	workDir := root
 	if ws.Dir != "" {
@@ -79,7 +75,7 @@ func Run(ctx context.Context, executor tf.Executor, ws config.Workspace, root st
 	}
 
 	if err := executor.Init(ctx, workDir, backendConfig); err != nil {
-		return WorkspaceResult{}, fmt.Errorf("terraform init failed: %w", err)
+		return WorkspaceResult{}, err
 	}
 
 	planOpts := tf.PlanOptions{
@@ -94,20 +90,20 @@ func Run(ctx context.Context, executor tf.Executor, ws config.Workspace, root st
 
 	result, err := executor.Plan(ctx, workDir, planOpts)
 	if err != nil {
-		if result.TimedOut {
-			return WorkspaceResult{Workspace: ws.Name, ExitCode: 1}, TimeoutError(planOpts.PlanTimeout)
+		if errors.Is(err, tf.ErrPlanTimeout) {
+			err = fmt.Errorf("%w; raise plan_timeout and retry", err)
 		}
-		return WorkspaceResult{Workspace: ws.Name, ExitCode: 1}, fmt.Errorf("terraform plan failed: %w", err)
+		return WorkspaceResult{Workspace: ws.Name, ExitCode: 1}, err
 	}
 
 	planJSON, err := executor.ShowPlanJSON(ctx, result.PlanFile)
 	if err != nil {
-		return WorkspaceResult{}, fmt.Errorf("terraform show -json failed: %w", err)
+		return WorkspaceResult{}, err
 	}
 
 	planRaw, err := executor.ShowPlanRaw(ctx, result.PlanFile)
 	if err != nil {
-		return WorkspaceResult{}, fmt.Errorf("terraform show failed: %w", err)
+		return WorkspaceResult{}, err
 	}
 
 	return WorkspaceResult{

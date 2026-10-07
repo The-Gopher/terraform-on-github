@@ -5,8 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
-	"sort"
+	"slices"
 	"time"
 
 	tfjson "github.com/hashicorp/terraform-json"
@@ -123,11 +124,7 @@ func Stage(
 		NamePlanText: planText,
 	}
 	// Deterministic upload order keeps test assertions and crash windows stable.
-	names := make([]string, 0, len(artifactsPayload)+1)
-	for name := range artifactsPayload {
-		names = append(names, name)
-	}
-	sort.Strings(names)
+	names := slices.Sorted(maps.Keys(artifactsPayload))
 
 	collision := false
 	for _, name := range names {

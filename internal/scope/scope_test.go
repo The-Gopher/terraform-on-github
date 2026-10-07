@@ -7,24 +7,26 @@ import (
 	"testing"
 
 	"github.com/google/go-github/v60/github"
+
 	"github.com/the-gopher/terraform-on-github/internal/config"
 	"github.com/the-gopher/terraform-on-github/internal/ghapp"
 )
+
 type mockClient struct {
-	pr        *github.PullRequest
-	refSHA    string
+	pr         *github.PullRequest
+	refSHA     string
 	comparison *ghapp.Comparison
 }
 
-func (m *mockClient) GetPullRequest(ctx context.Context, owner, repo string, number int) (*github.PullRequest, error) {
+func (m *mockClient) GetPullRequest(context.Context, string, string, int) (*github.PullRequest, error) {
 	return m.pr, nil
 }
 
-func (m *mockClient) ResolveRef(ctx context.Context, owner, repo, ref string) (string, error) {
+func (m *mockClient) ResolveRef(context.Context, string, string, string) (string, error) {
 	return m.refSHA, nil
 }
 
-func (m *mockClient) CompareCommits(ctx context.Context, owner, repo, base, head string) (*ghapp.Comparison, error) {
+func (m *mockClient) CompareCommits(context.Context, string, string, string, string) (*ghapp.Comparison, error) {
 	return m.comparison, nil
 }
 
@@ -56,13 +58,13 @@ func TestScope(t *testing.T) {
 		wantCfg  bool
 	}{
 		{
-			name:    "branch glob match",
-			baseRef: "release/v1.0",
-			files:   []*github.CommitFile{{Filename: new("envs/prod/main.tf")}},
-			wantWS:  []string{"prod"},
+			name:     "branch glob match",
+			baseRef:  "release/v1.0",
+			files:    []*github.CommitFile{{Filename: new("envs/prod/main.tf")}},
+			wantWS:   []string{"prod"},
 			wantStat: []Status{StatusAhead},
-			ahead:   1,
-			wantCfg: false,
+			ahead:    1,
+			wantCfg:  false,
 		},
 		{
 			baseRef: "release/v1.0",
@@ -71,20 +73,20 @@ func TestScope(t *testing.T) {
 			wantCfg: false,
 		},
 		{
-			baseRef: "release/v1.0",
-			files:   []*github.CommitFile{{Filename: new("envs/prod/main.tf")}},
-			wantWS:  []string{"prod"},
+			baseRef:  "release/v1.0",
+			files:    []*github.CommitFile{{Filename: new("envs/prod/main.tf")}},
+			wantWS:   []string{"prod"},
 			wantStat: []Status{StatusAhead},
-			ahead:   1,
-			wantCfg: false,
+			ahead:    1,
+			wantCfg:  false,
 		},
 		{
-			baseRef: "release/v1.0",
-			files:   []*github.CommitFile{{Filename: new("modules/shared/vpc/main.tf")}},
-			wantWS:  []string{"prod"},
+			baseRef:  "release/v1.0",
+			files:    []*github.CommitFile{{Filename: new("modules/shared/vpc/main.tf")}},
+			wantWS:   []string{"prod"},
 			wantStat: []Status{StatusAhead},
-			ahead:   1,
-			wantCfg: false,
+			ahead:    1,
+			wantCfg:  false,
 		},
 		{
 			baseRef: "release/v1.0",
@@ -93,21 +95,21 @@ func TestScope(t *testing.T) {
 			wantCfg: true,
 		},
 		{
-			baseRef: "release/v1.0",
-			files:   []*github.CommitFile{{Filename: new("envs/prod/main.tf")}},
-			wantWS:  []string{"prod"},
+			baseRef:  "release/v1.0",
+			files:    []*github.CommitFile{{Filename: new("envs/prod/main.tf")}},
+			wantWS:   []string{"prod"},
 			wantStat: []Status{StatusBehind},
 			behind:   1,
-			wantCfg: false,
+			wantCfg:  false,
 		},
 		{
-			baseRef: "release/v1.0",
-			files:   []*github.CommitFile{{Filename: new("envs/prod/main.tf")}},
-			wantWS:  []string{"prod"},
+			baseRef:  "release/v1.0",
+			files:    []*github.CommitFile{{Filename: new("envs/prod/main.tf")}},
+			wantWS:   []string{"prod"},
 			wantStat: []Status{StatusDiverged},
-			ahead:   1,
+			ahead:    1,
 			behind:   1,
-			wantCfg: false,
+			wantCfg:  false,
 		},
 	}
 
@@ -151,6 +153,7 @@ func TestScope(t *testing.T) {
 		})
 	}
 }
+
 func TestScopeJSON(t *testing.T) {
 	cfg := &config.Config{
 		Workspaces: []config.Workspace{{Name: "prod", Branch: "main", Dir: "envs/prod"}},
@@ -162,18 +165,18 @@ func TestScopeJSON(t *testing.T) {
 		},
 		refSHA: "base",
 		comparison: &ghapp.Comparison{
-			Files: []*github.CommitFile{{Filename: new("envs/prod/main.tf")}},
+			Files:   []*github.CommitFile{{Filename: new("envs/prod/main.tf")}},
 			AheadBy: 1,
 		},
 	}
 	s := NewScoper(client, cfg)
 	res, _ := s.Scope(context.Background(), "owner", "repo", 1)
-	
+
 	data, err := json.Marshal(res)
 	if err != nil {
 		t.Fatalf("json marshal failed: %v", err)
 	}
-	
+
 	out := string(data)
 	if !strings.Contains(out, `"ConfigChanged":false`) {
 		t.Errorf("expected ConfigChanged:false in json, got %s", out)

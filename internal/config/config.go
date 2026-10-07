@@ -15,9 +15,8 @@ import (
 // rather than as a bare number of seconds, so the config reads like the design document.
 //
 // A named type rather than a plain time.Duration because yaml.v3 decodes a duration only from an
-// integer count of nanoseconds. The usual trick of shadowing the field in an anonymous struct
-// does not work here either: yaml.v3 ignores an un-tagged embedded pointer silently, and panics
-// on a duplicated key when the embed is tagged `,inline`. So the conversion belongs on the type.
+// integer count of nanoseconds. Implementing encoding.TextUnmarshaler and TextMarshaler puts the
+// conversion on the type, where yaml.v3 and encoding/json both pick it up.
 type Duration time.Duration
 
 // Duration returns the value as a time.Duration.
@@ -25,13 +24,10 @@ func (d Duration) Duration() time.Duration { return time.Duration(d) }
 
 func (d Duration) String() string { return time.Duration(d).String() }
 
-// UnmarshalYAML accepts any form time.ParseDuration accepts. An absent or empty value decodes to
-// zero, which is what lets Config.Normalize tell "unset" from "explicitly zero".
-func (d *Duration) UnmarshalYAML(unmarshal func(any) error) error {
-	var s string
-	if err := unmarshal(&s); err != nil {
-		return fmt.Errorf("expected a duration like 30s, 20m or 24h: %w", err)
-	}
+// UnmarshalText accepts any form time.ParseDuration accepts. An empty value decodes to zero, which
+// is what lets Config.Normalize tell "unset" from "explicitly zero".
+func (d *Duration) UnmarshalText(text []byte) error {
+	s := string(text)
 	if s == "" {
 		*d = 0
 		return nil
@@ -47,8 +43,8 @@ func (d *Duration) UnmarshalYAML(unmarshal func(any) error) error {
 	return nil
 }
 
-// MarshalYAML writes the human form back, so a round-trip does not turn "20m" into 1200000000000.
-func (d Duration) MarshalYAML() (any, error) { return time.Duration(d).String(), nil }
+// MarshalText writes the human form back, so a round-trip does not turn "20m" into 1200000000000.
+func (d Duration) MarshalText() ([]byte, error) { return []byte(time.Duration(d).String()), nil }
 
 // SchemaVersion is the only accepted value of the top-level `version` key. Bumping it is a
 // breaking change requiring a migration path for every consuming repo.
@@ -189,6 +185,7 @@ const (
 	StaleReplanIfEquivalent StalePolicy = "replan_if_equivalent"
 )
 
+// Environment is the GitHub deployment environment that gates the workspace's apply.
 func (w Workspace) Environment() string {
 	return w.Name
 }

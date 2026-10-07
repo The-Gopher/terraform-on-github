@@ -6,7 +6,8 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
-	"sort"
+	"slices"
+	"strings"
 )
 
 // ErrAlreadyExists is what Create returns when the object exists — the 412
@@ -98,11 +99,11 @@ func (b *MapBucket) Read(_ context.Context, name string) ([]byte, int64, error) 
 func (b *MapBucket) List(_ context.Context, prefix string) ([]string, error) {
 	var names []string
 	for name := range b.objects {
-		if len(name) >= len(prefix) && name[:len(prefix)] == prefix {
+		if strings.HasPrefix(name, prefix) {
 			names = append(names, name)
 		}
 	}
-	sort.Strings(names)
+	slices.Sort(names)
 	return names, nil
 }
 

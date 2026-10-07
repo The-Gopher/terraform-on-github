@@ -136,7 +136,7 @@ var ErrNoConfig = errors.New("repository has no " + Filename + " on its trusted 
 
 // LoadFromFile reads and validates a config file from the local filesystem.
 func LoadFromFile(path string) (*Config, error) {
-	raw, err := os.ReadFile(path)
+	raw, err := os.ReadFile(path) //nolint:gosec // G304: the operator names the file
 	if err != nil {
 		return nil, err
 	}
@@ -365,7 +365,7 @@ func validateRepoPath(p string) error {
 		return fmt.Errorf("must be repo-relative, got %q", p)
 	}
 	if strings.ContainsRune(p, 0) {
-		return fmt.Errorf("contains a NUL byte")
+		return errors.New("contains a NUL byte")
 	}
 	clean := path.Clean(p)
 	if clean == ".." || strings.HasPrefix(clean, "../") {
@@ -374,12 +374,12 @@ func validateRepoPath(p string) error {
 	return nil
 }
 
-// saRE matches a GCP service-account email. Deliberately strict: this value names a credential
-// the runner is about to assume, so "close enough" is the wrong bar. Anything that is not
-// obviously one identity should fail validation rather than be passed to gcloud.
 // exactVersionRE requires major.minor.patch and nothing else — no ranges, no operators.
 var exactVersionRE = regexp.MustCompile(`^\d+\.\d+\.\d+$`)
 
+// saRE matches a GCP service-account email. Deliberately strict: this value names a credential
+// the runner is about to assume, so "close enough" is the wrong bar. Anything that is not
+// obviously one identity should fail validation rather than be passed to gcloud.
 var saRE = regexp.MustCompile(`^[a-z]([-a-z0-9]{4,28}[a-z0-9])@[a-z][-a-z0-9]{4,28}[a-z0-9]\.iam\.gserviceaccount\.com$`)
 
 func isServiceAccountEmail(s string) bool { return saRE.MatchString(s) }

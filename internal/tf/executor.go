@@ -1,3 +1,6 @@
+// Package tf runs Terraform for one workspace — init, plan and show — and renders plan
+// summaries. Summary rendering lives here rather than in cmd/ so the M6 worker and the CLI
+// render identically from the same code.
 package tf
 
 import (
@@ -10,7 +13,7 @@ import (
 	"strings"
 
 	"github.com/hashicorp/terraform-exec/tfexec"
-	"github.com/hashicorp/terraform-json"
+	tfjson "github.com/hashicorp/terraform-json"
 )
 
 // Executor runs Terraform commands for a workspace.
@@ -21,19 +24,22 @@ type Executor interface {
 	ShowPlanRaw(ctx context.Context, planFile string) (string, error)
 }
 
-type tfexecExecutor struct {
+// CLIExecutor is the Executor that drives a terraform binary through terraform-exec.
+type CLIExecutor struct {
 	terraformPath string
 }
 
-// NewExecutor creates a new tfexec-based executor.
-func NewExecutor(terraformPath string) Executor {
+// NewExecutor returns a CLIExecutor for the terraform binary at terraformPath, or for
+// "terraform" on PATH when terraformPath is empty.
+func NewExecutor(terraformPath string) *CLIExecutor {
 	if terraformPath == "" {
 		terraformPath = "terraform"
 	}
-	return &tfexecExecutor{terraformPath: terraformPath}
+	return &CLIExecutor{terraformPath: terraformPath}
 }
 
-func (e *tfexecExecutor) Init(ctx context.Context, workDir string, backendConfig map[string]string) error {
+// Init runs terraform init with the given -backend-config values and -lock=false.
+func (e *CLIExecutor) Init(ctx context.Context, workDir string, backendConfig map[string]string) error {
 	tf, err := tfexec.NewTerraform(workDir, e.terraformPath)
 	if err != nil {
 		return fmt.Errorf("create tfexec: %w", err)
@@ -52,7 +58,9 @@ func (e *tfexecExecutor) Init(ctx context.Context, workDir string, backendConfig
 	return nil
 }
 
-func (e *tfexecExecutor) Plan(ctx context.Context, workDir string, opts PlanOptions) (PlanResult, error) {
+// Plan runs terraform plan -out=tfplan in workDir, bounded by opts.PlanTimeout when it is set.
+// A plan killed by the timeout returns an error wrapping ErrPlanTimeout.
+func (e *CLIExecutor) Plan(ctx context.Context, workDir string, opts PlanOptions) (PlanResult, error) {
 	if opts.PlanTimeout > 0 {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, opts.PlanTimeout)
@@ -64,14 +72,12 @@ func (e *tfexecExecutor) Plan(ctx context.Context, workDir string, opts PlanOpti
 		return PlanResult{}, fmt.Errorf("create tfexec: %w", err)
 	}
 
-	// Select workspace if specified
 	if opts.TerraformWorkspace != "" {
 		if err := tf.WorkspaceSelect(ctx, opts.TerraformWorkspace); err != nil {
 			return PlanResult{}, fmt.Errorf("select workspace %q: %w", opts.TerraformWorkspace, err)
 		}
 	}
 
-	// Capture stdout/stderr
 	var stdoutBuf, stderrBuf bytes.Buffer
 	tf.SetStdout(&stdoutBuf)
 	tf.SetStderr(&stderrBuf)
@@ -91,13 +97,11 @@ func (e *tfexecExecutor) Plan(ctx context.Context, workDir string, opts PlanOpti
 	}
 
 	hasChanges, err := tf.Plan(ctx, planOpts...)
-	stdout := stdoutBuf.String()
-	stderr := stderrBuf.String()
 
 	result := PlanResult{
 		PlanFile:   planFile,
-		Stdout:     stdout,
-		Stderr:     stderr,
+		Stdout:     stdoutBuf.String(),
+		Stderr:     stderrBuf.String(),
 		HasChanges: hasChanges,
 	}
 
@@ -116,7 +120,6 @@ func (e *tfexecExecutor) Plan(ctx context.Context, workDir string, opts PlanOpti
 		// tfexec's cmdErr answers errors.Is for context.DeadlineExceeded; check the
 		// error itself, not just ctx.Err(), so callers can errors.Is the same way.
 		if errors.Is(err, context.DeadlineExceeded) {
-			result.TimedOut = true
 			return result, fmt.Errorf("%w after %v: %w", ErrPlanTimeout, opts.PlanTimeout, err)
 		}
 		return result, fmt.Errorf("terraform plan: %w", err)
@@ -125,7 +128,8 @@ func (e *tfexecExecutor) Plan(ctx context.Context, workDir string, opts PlanOpti
 	return result, nil
 }
 
-func (e *tfexecExecutor) ShowPlanJSON(ctx context.Context, planFile string) (*tfjson.Plan, error) {
+// ShowPlanJSON runs terraform show -json on planFile and returns the parsed plan.
+func (e *CLIExecutor) ShowPlanJSON(ctx context.Context, planFile string) (*tfjson.Plan, error) {
 	workDir := filepath.Dir(planFile)
 	tf, err := tfexec.NewTerraform(workDir, e.terraformPath)
 	if err != nil {
@@ -140,7 +144,8 @@ func (e *tfexecExecutor) ShowPlanJSON(ctx context.Context, planFile string) (*tf
 	return plan, nil
 }
 
-func (e *tfexecExecutor) ShowPlanRaw(ctx context.Context, planFile string) (string, error) {
+// ShowPlanRaw runs terraform show on planFile and returns the human-readable plan.
+func (e *CLIExecutor) ShowPlanRaw(ctx context.Context, planFile string) (string, error) {
 	workDir := filepath.Dir(planFile)
 	tf, err := tfexec.NewTerraform(workDir, e.terraformPath)
 	if err != nil {
@@ -167,18 +172,18 @@ func FindTerraformBinary() (string, error) {
 // ValidatePlanArgs checks that plan args don't contain reserved flags.
 func ValidatePlanArgs(args []string) error {
 	reserved := map[string]bool{
-		"-lock":        true,
-		"-out":         true,
-		"-input":       true,
-		"-state":       true,
-		"-var-file":    true,
-		"-chdir":       true,
-		"--lock":       true,
-		"--out":        true,
-		"--input":      true,
-		"--state":      true,
-		"--var-file":   true,
-		"--chdir":      true,
+		"-lock":      true,
+		"-out":       true,
+		"-input":     true,
+		"-state":     true,
+		"-var-file":  true,
+		"-chdir":     true,
+		"--lock":     true,
+		"--out":      true,
+		"--input":    true,
+		"--state":    true,
+		"--var-file": true,
+		"--chdir":    true,
 	}
 
 	for _, arg := range args {
