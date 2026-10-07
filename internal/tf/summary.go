@@ -1,5 +1,3 @@
-// Package tf — plan summary rendering. Kept here rather than in cmd/ so the M6 worker and
-// the CLI render identically from the same code.
 package tf
 
 import (
@@ -16,9 +14,7 @@ func BuildPlanSummary(plan *tfjson.Plan, detail config.SummaryDetail) string {
 	switch detail {
 	case config.SummaryFull:
 		return formatFullSummary(plan)
-	case config.SummaryAddresses:
-		fallthrough
-	default:
+	default: // config.SummaryAddresses, the safe default
 		return FormatAddressesSummary(plan)
 	}
 }

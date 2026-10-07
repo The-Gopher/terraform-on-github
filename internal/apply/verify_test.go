@@ -141,6 +141,29 @@ func (f *fakeContents) ResolveRef(_ context.Context, _, _, _ string) (string, er
 	return "cfgsha", nil
 }
 
+// verify runs Verify against the fixture's staged artifact.
+func (f *fixture) verify() (Verdict, error) {
+	return f.verifier().Verify(context.Background(), Request{
+		Owner: "acme", Repo: "infra", PR: f.pr, Workspace: "prod",
+		BaseSHA: f.baseSHA, HeadSHA: f.headSHA,
+	})
+}
+
+// rejected asserts err is a *RejectedError wrapping want, with an explanation.
+func rejected(t *testing.T, err, want error) {
+	t.Helper()
+	var re *RejectedError
+	if !errors.As(err, &re) {
+		t.Fatalf("err = %v (%T), want *RejectedError", err, err)
+	}
+	if !errors.Is(err, want) {
+		t.Errorf("err = %v, want it to wrap %v", err, want)
+	}
+	if re.Reason == "" {
+		t.Error("rejection should carry an operator-facing reason")
+	}
+}
+
 func (f *fixture) verifier() *Verifier {
 	return &Verifier{
 		GitHub:    f.github,
@@ -154,12 +177,9 @@ func (f *fixture) verifier() *Verifier {
 // commit (two parents, tree == head's tree).
 func TestVerify_ApplicableOnMergeCommit(t *testing.T) {
 	f := newFixture(t)
-	v, err := f.verifier().Verify(context.Background(), "acme", "infra", f.pr, "prod", f.baseSHA, f.headSHA)
+	v, err := f.verify()
 	if err != nil {
 		t.Fatalf("Verify: %v", err)
-	}
-	if !v.Applicable {
-		t.Fatalf("verdict: %+v", v)
 	}
 	if v.Meta.PR != f.pr || v.Meta.Workspace != "prod" {
 		t.Errorf("meta identity: %+v", v.Meta)
@@ -186,12 +206,8 @@ func TestVerify_TreeEqualityAcrossMergeStrategies(t *testing.T) {
 			f.github.mergeCommit = s.mergeCommit
 			f.github.mergeTree = s.mergeTree
 
-			v, err := f.verifier().Verify(context.Background(), "acme", "infra", f.pr, "prod", f.baseSHA, f.headSHA)
-			if err != nil {
+			if _, err := f.verify(); err != nil {
 				t.Fatalf("%s: Verify: %v", s.name, err)
-			}
-			if !v.Applicable {
-				t.Errorf("%s: verdict %q", s.name, v.Reason)
 			}
 		})
 	}
@@ -204,16 +220,8 @@ func TestVerify_TreeMismatchRejectsMovedBase(t *testing.T) {
 	f := newFixture(t)
 	f.github.mergeTree = "tree-after-others-merged"
 
-	v, err := f.verifier().Verify(context.Background(), "acme", "infra", f.pr, "prod", f.baseSHA, f.headSHA)
-	if !errors.Is(err, ErrTreeMismatch) {
-		t.Fatalf("err = %v, want ErrTreeMismatch", err)
-	}
-	if v.Applicable {
-		t.Error("moved base must not be applicable")
-	}
-	if v.Reason == "" {
-		t.Error("verdict should carry the §6.2 explanation")
-	}
+	_, err := f.verify()
+	rejected(t, err, ErrTreeMismatch)
 }
 
 // TestVerify_RejectsUnsignedMeta is §5.3: a forged meta.json fails signature
@@ -238,13 +246,8 @@ func TestVerify_RejectsUnsignedMeta(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	v, err := f.verifier().Verify(context.Background(), "acme", "infra", f.pr, "prod", f.baseSHA, f.headSHA)
-	if !errors.Is(err, ErrBadSignature) {
-		t.Fatalf("err = %v, want ErrBadSignature", err)
-	}
-	if v.Applicable {
-		t.Error("forged meta must not be applicable")
-	}
+	_, err = f.verify()
+	rejected(t, err, ErrBadSignature)
 }
 
 // TestVerify_RejectsDriftKind is §6.6: a drift artifact is produced by the
@@ -282,13 +285,8 @@ func TestVerify_RejectsDriftKind(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	v, err := f.verifier().Verify(context.Background(), "acme", "infra", f.pr, "prod", f.baseSHA, f.headSHA)
-	if !errors.Is(err, ErrInapplicableKind) {
-		t.Fatalf("err = %v, want ErrInapplicableKind", err)
-	}
-	if v.Applicable {
-		t.Error("drift plan must never be applicable (§6.6)")
-	}
+	_, err = f.verify()
+	rejected(t, err, ErrInapplicableKind)
 }
 
 // TestVerify_RejectsPlanByteSwap proves the signature binds the plan bytes:
@@ -301,10 +299,8 @@ func TestVerify_RejectsPlanByteSwap(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err := f.verifier().Verify(context.Background(), "acme", "infra", f.pr, "prod", f.baseSHA, f.headSHA)
-	if !errors.Is(err, ErrPlanSHA) {
-		t.Fatalf("err = %v, want ErrPlanSHA", err)
-	}
+	_, err := f.verify()
+	rejected(t, err, ErrPlanSHA)
 }
 
 // TestVerify_NotMerged is the §6.1 precondition.
@@ -312,10 +308,8 @@ func TestVerify_NotMerged(t *testing.T) {
 	f := newFixture(t)
 	f.github.merged = false
 
-	_, err := f.verifier().Verify(context.Background(), "acme", "infra", f.pr, "prod", f.baseSHA, f.headSHA)
-	if !errors.Is(err, ErrNotMerged) {
-		t.Fatalf("err = %v, want ErrNotMerged", err)
-	}
+	_, err := f.verify()
+	rejected(t, err, ErrNotMerged)
 }
 
 // TestVerify_BaseMovedFirstParent is §6.1's parent assertion: the merge landed
@@ -324,10 +318,8 @@ func TestVerify_BaseMovedFirstParent(t *testing.T) {
 	f := newFixture(t)
 	f.github.parents = []string{"newbase9999", f.headSHA}
 
-	_, err := f.verifier().Verify(context.Background(), "acme", "infra", f.pr, "prod", f.baseSHA, f.headSHA)
-	if !errors.Is(err, ErrBaseMoved) {
-		t.Fatalf("err = %v, want ErrBaseMoved", err)
-	}
+	_, err := f.verify()
+	rejected(t, err, ErrBaseMoved)
 }
 
 // TestVerify_WorkspaceDeauthorizedAfterPlan is §3.1 fail-closed: a workspace
@@ -336,11 +328,9 @@ func TestVerify_WorkspaceDeauthorizedAfterPlan(t *testing.T) {
 	f := newFixture(t)
 	f.contents.missingWorkspace = true
 
-	v, err := f.verifier().Verify(context.Background(), "acme", "infra", f.pr, "prod", f.baseSHA, f.headSHA)
-	if err == nil {
-		t.Fatal("deauthorized workspace must not verify")
-	}
-	if v.Applicable {
-		t.Error("deauthorized workspace must not be applicable")
+	_, err := f.verify()
+	var re *RejectedError
+	if !errors.As(err, &re) {
+		t.Fatalf("err = %v, want a *RejectedError for a deauthorized workspace", err)
 	}
 }

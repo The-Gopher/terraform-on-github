@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -28,17 +29,17 @@ type mockExecutor struct {
 	showErr error
 }
 
-func (m *mockExecutor) Init(ctx context.Context, workDir string, backendConfig map[string]string) error {
+func (m *mockExecutor) Init(context.Context, string, map[string]string) error {
 	m.initCalls++
 	return nil
 }
 
-func (m *mockExecutor) Plan(ctx context.Context, workDir string, opts tf.PlanOptions) (tf.PlanResult, error) {
+func (m *mockExecutor) Plan(context.Context, string, tf.PlanOptions) (tf.PlanResult, error) {
 	m.planCalls++
 	return m.planResult, m.planErr
 }
 
-func (m *mockExecutor) ShowPlanJSON(ctx context.Context, planFile string) (*tfjson.Plan, error) {
+func (m *mockExecutor) ShowPlanJSON(context.Context, string) (*tfjson.Plan, error) {
 	m.showCalls++
 	if m.showErr != nil {
 		return nil, m.showErr
@@ -46,7 +47,7 @@ func (m *mockExecutor) ShowPlanJSON(ctx context.Context, planFile string) (*tfjs
 	return m.plan, nil
 }
 
-func (m *mockExecutor) ShowPlanRaw(ctx context.Context, planFile string) (string, error) {
+func (m *mockExecutor) ShowPlanRaw(context.Context, string) (string, error) {
 	m.showCalls++
 	if m.showErr != nil {
 		return "", m.showErr
@@ -114,8 +115,7 @@ func TestRun_OrchestratesAndSummarizes(t *testing.T) {
 
 func TestRun_TimeoutSurfacesAsTimeout(t *testing.T) {
 	ex := &mockExecutor{
-		planResult: tf.PlanResult{TimedOut: true},
-		planErr:    errors.New("terraform plan timed out after 1s"),
+		planErr: fmt.Errorf("%w after 1s", tf.ErrPlanTimeout),
 	}
 
 	_, err := Run(context.Background(), ex, workspace(), "/repo")

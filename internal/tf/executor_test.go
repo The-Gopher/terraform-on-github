@@ -36,7 +36,7 @@ func module(t *testing.T) string {
 func TestPlan_ExitCodeNoChanges(t *testing.T) {
 	// Exit 0, no changes.
 	path := fakeTerraform(t, "#!/bin/sh\nexit 0\n")
-	e := NewExecutor(path).(*tfexecExecutor)
+	e := NewExecutor(path)
 
 	result, err := e.Plan(context.Background(), module(t), PlanOptions{})
 	if err != nil {
@@ -53,7 +53,7 @@ func TestPlan_ExitCodeNoChanges(t *testing.T) {
 func TestPlan_ExitCodeChanges(t *testing.T) {
 	// Exit 2, changes present — a success per §4.3, not an error.
 	path := fakeTerraform(t, "#!/bin/sh\nexit 2\n")
-	e := NewExecutor(path).(*tfexecExecutor)
+	e := NewExecutor(path)
 
 	result, err := e.Plan(context.Background(), module(t), PlanOptions{})
 	if err != nil {
@@ -70,7 +70,7 @@ func TestPlan_ExitCodeChanges(t *testing.T) {
 func TestPlan_ExitCodeFailure(t *testing.T) {
 	// Exit 1 — a real failure. ExitCode carries 1, not 0/2.
 	path := fakeTerraform(t, "#!/bin/sh\necho boom >&2\nexit 1\n")
-	e := NewExecutor(path).(*tfexecExecutor)
+	e := NewExecutor(path)
 
 	result, err := e.Plan(context.Background(), module(t), PlanOptions{})
 	if err == nil {
@@ -79,23 +79,29 @@ func TestPlan_ExitCodeFailure(t *testing.T) {
 	if result.ExitCode != 1 {
 		t.Errorf("ExitCode = %d, want 1", result.ExitCode)
 	}
-	if result.TimedOut {
-		t.Error("TimedOut = true, want false")
+	if errors.Is(err, ErrPlanTimeout) {
+		t.Error("a plan failure must not read as a timeout")
 	}
 }
 
 func TestPlan_Timeout(t *testing.T) {
-	// Sleeps longer than the deadline; the kill must surface as TimedOut, not a plain
+	// Sleeps longer than the deadline; the kill must surface as ErrPlanTimeout, not a plain
 	// terraform failure, and the error must wrap context.DeadlineExceeded.
+	//
+	// Slow: the fake's `sleep` grandchild holds stdout open after the kill, so Wait returns
+	// only when it exits (~30s). Skipped under -short.
+	if testing.Short() {
+		t.Skip("slow: waits for the killed plan's grandchild to exit")
+	}
 	path := fakeTerraform(t, "#!/bin/sh\nsleep 30\n")
-	e := NewExecutor(path).(*tfexecExecutor)
+	e := NewExecutor(path)
 
-	result, err := e.Plan(context.Background(), module(t), PlanOptions{PlanTimeout: 2 * time.Second})
+	_, err := e.Plan(context.Background(), module(t), PlanOptions{PlanTimeout: 2 * time.Second})
 	if err == nil {
 		t.Fatal("expected error for timed-out plan, got nil")
 	}
-	if !result.TimedOut {
-		t.Error("TimedOut = false, want true")
+	if !errors.Is(err, ErrPlanTimeout) {
+		t.Errorf("error %v does not wrap ErrPlanTimeout", err)
 	}
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Errorf("error %v does not wrap context.DeadlineExceeded", err)
@@ -105,13 +111,9 @@ func TestPlan_Timeout(t *testing.T) {
 func TestPlan_ZeroTimeoutRunsForever(t *testing.T) {
 	// PlanTimeout unset (zero) means no deadline — must not time out immediately.
 	path := fakeTerraform(t, "#!/bin/sh\nexit 0\n")
-	e := NewExecutor(path).(*tfexecExecutor)
+	e := NewExecutor(path)
 
-	result, err := e.Plan(context.Background(), module(t), PlanOptions{})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if result.TimedOut {
-		t.Error("TimedOut = true, want false for zero timeout")
+	if _, err := e.Plan(context.Background(), module(t), PlanOptions{}); err != nil {
+		t.Fatalf("unexpected error for zero timeout: %v", err)
 	}
 }

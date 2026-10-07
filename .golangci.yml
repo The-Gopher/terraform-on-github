@@ -1,2 +1,29 @@
 version: "2"
 
+linters:
+  enable:
+    - bodyclose
+    - errorlint
+    - gocritic
+    - gosec
+    - misspell
+    - nilerr
+    - revive
+    - unparam
+  settings:
+    errcheck:
+      # A failed write to the terminal is not actionable; the CLI's output is best-effort.
+      exclude-functions:
+        - fmt.Fprint
+        - fmt.Fprintf
+        - fmt.Fprintln
+  exclusions:
+    rules:
+      # Tests write fixtures and fake binaries into t.TempDir().
+      - path: _test\.go
+        linters: [gosec]
+
+formatters:
+  enable:
+    - gofmt
+    - goimports

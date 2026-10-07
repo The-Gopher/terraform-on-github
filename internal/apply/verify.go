@@ -22,11 +22,11 @@ import (
 	"github.com/the-gopher/terraform-on-github/internal/store"
 )
 
-// Verdict is what Verify concludes. Applicable is the only passing state; the
-// failure reasons carry the §-reference the operator needs to act on.
+// Verdict is what a passing Verify concludes. A failing Verify returns no verdict, only a
+// *RejectedError (or an operational error).
 type Verdict struct {
-	Applicable bool
-	Reason     string
+	// Reason summarizes what was verified, for logs.
+	Reason string
 
 	// Meta is the verified artifact's provenance, for the would-apply summary
 	// printed after a pass.
@@ -52,6 +52,17 @@ type PullRequest struct {
 	BaseRef        string
 	BaseSHA        string
 	HeadSHA        string
+}
+
+// Request names the staged artifact to verify: the (repo, PR, workspace) and the (base, head)
+// pair its key composes from (§5).
+type Request struct {
+	Owner     string
+	Repo      string
+	PR        int
+	Workspace string
+	BaseSHA   string
+	HeadSHA   string
 }
 
 // Verifier runs the §6 checks for one (repo, PR, workspace).
@@ -93,7 +104,26 @@ var (
 	ErrStale = errors.New("saved plan is stale")
 )
 
-// Verify runs the whole gauntlet and returns the first failure as a verdict.
+// RejectedError is a verification that ran to a verdict and refused: the plan is not
+// applicable. Reason is operator-facing and carries the § reference to act on; Err is one of
+// the sentinels above, so callers branch with errors.Is.
+//
+// Any other error from Verify is operational (a failed fetch, an unreadable config) — a retry,
+// not a verdict.
+type RejectedError struct {
+	Reason string
+	Err    error
+}
+
+func (e *RejectedError) Error() string { return e.Reason }
+
+func (e *RejectedError) Unwrap() error { return e.Err }
+
+func reject(sentinel error, format string, args ...any) error {
+	return &RejectedError{Reason: fmt.Sprintf(format, args...), Err: sentinel}
+}
+
+// Verify runs the whole gauntlet and returns the first failure as a *RejectedError.
 // Order matters for error quality: cheap local checks (signature, kind,
 // digest) before GitHub calls, so a forged artifact fails without network
 // round trips and a merged-but-moved PR fails with the specific reason.
@@ -110,9 +140,10 @@ var (
 //     squash/rebase/merge-commit, rejects a moved base
 //  6. §3.1 config re-authorization: the workspace still exists on the trusted
 //     ref's current tip (fail-closed on change, per LoadFromTrustedRef)
-func (v *Verifier) Verify(ctx context.Context, owner, repo string, pr int, workspace, baseSHA, headSHA string) (Verdict, error) {
-	metaKey := store.Key(owner, repo, workspace, baseSHA, headSHA, store.NameMeta)
-	planKey := store.Key(owner, repo, workspace, baseSHA, headSHA, store.NamePlan)
+func (v *Verifier) Verify(ctx context.Context, req Request) (Verdict, error) {
+	owner, repo, baseSHA := req.Owner, req.Repo, req.BaseSHA
+	metaKey := store.Key(owner, repo, req.Workspace, baseSHA, req.HeadSHA, store.NameMeta)
+	planKey := store.Key(owner, repo, req.Workspace, baseSHA, req.HeadSHA, store.NamePlan)
 
 	metaRaw, _, err := v.Artifacts.Read(ctx, metaKey)
 	if err != nil {
@@ -129,14 +160,14 @@ func (v *Verifier) Verify(ctx context.Context, owner, repo string, pr int, works
 		return Verdict{}, err
 	}
 	if err := v.KMS.Verify(ctx, digest, meta.Signature); err != nil {
-		return Verdict{Applicable: false, Reason: fmt.Sprintf("KMS signature over meta.json failed: %v (§5.3)", err)}, ErrBadSignature
+		return Verdict{}, reject(ErrBadSignature, "KMS signature over meta.json failed: %v (§5.3)", err)
 	}
 
 	// 2. §6.6 — whitelist, not denylist. The tree check would pass a drift plan
 	// of main (its planned_tree_sha IS main's tip tree); kind is what
 	// distinguishes reviewed from scheduled, and it is inside the signature.
 	if err := meta.Validate(); err != nil {
-		return Verdict{Applicable: false, Reason: fmt.Sprintf("%v (§6.6)", err)}, ErrInapplicableKind
+		return Verdict{}, reject(ErrInapplicableKind, "%v (§6.6)", err)
 	}
 
 	// 3. §5.3 — the plan bytes on disk must be the ones the signature covered.
@@ -145,22 +176,22 @@ func (v *Verifier) Verify(ctx context.Context, owner, repo string, pr int, works
 		return Verdict{}, fmt.Errorf("fetching tfplan: %w", err)
 	}
 	if store.PlanSHA(planRaw) != meta.PlanSHA256 {
-		return Verdict{Applicable: false, Reason: "tfplan bytes do not match the signed plan_sha256 (§5.3)"}, ErrPlanSHA
+		return Verdict{}, reject(ErrPlanSHA, "tfplan bytes do not match the signed plan_sha256 (§5.3)")
 	}
 
 	// 4. §6.1 — nothing in the trigger is trusted; re-derive from GitHub.
-	pull, err := v.GitHub.GetApplyPullRequest(ctx, owner, repo, pr)
+	pull, err := v.GitHub.GetApplyPullRequest(ctx, owner, repo, req.PR)
 	if err != nil {
 		return Verdict{}, fmt.Errorf("re-deriving PR state: %w", err)
 	}
 	if !pull.Merged {
-		return Verdict{Applicable: false, Reason: "pull request has not merged (§6.1)"}, ErrNotMerged
+		return Verdict{}, reject(ErrNotMerged, "pull request has not merged (§6.1)")
 	}
 	if pull.MergeCommitSHA == "" {
-		return Verdict{Applicable: false, Reason: "merged PR has no merge_commit_sha yet (§6.1)"}, ErrNotMerged
+		return Verdict{}, reject(ErrNotMerged, "merged PR has no merge_commit_sha yet (§6.1)")
 	}
 	if meta.BaseSHA != baseSHA {
-		return Verdict{Applicable: false, Reason: fmt.Sprintf("artifact planned base %s, PR base is %s (§6.1)", short(meta.BaseSHA), short(baseSHA))}, ErrBaseMoved
+		return Verdict{}, reject(ErrBaseMoved, "artifact planned base %s, PR base is %s (§6.1)", short(meta.BaseSHA), short(baseSHA))
 	}
 
 	// merge_commit^1 == base_sha: the merge landed on the same base the plan
@@ -171,7 +202,7 @@ func (v *Verifier) Verify(ctx context.Context, owner, repo string, pr int, works
 		return Verdict{}, fmt.Errorf("reading merge commit parents: %w", err)
 	}
 	if len(parents) == 0 || parents[0] != baseSHA {
-		return Verdict{Applicable: false, Reason: fmt.Sprintf("merge commit's first parent is %s, planned base was %s (§6.1)", short(first(parents)), short(baseSHA))}, ErrBaseMoved
+		return Verdict{}, reject(ErrBaseMoved, "merge commit's first parent is %s, planned base was %s (§6.1)", short(first(parents)), short(baseSHA))
 	}
 
 	// 5. §6.2 — tree-SHA equality. The merge commit SHA is new under squash and
@@ -182,7 +213,7 @@ func (v *Verifier) Verify(ctx context.Context, owner, repo string, pr int, works
 		return Verdict{}, fmt.Errorf("reading merge commit tree: %w", err)
 	}
 	if mergeTree != meta.PlannedTreeSHA {
-		return Verdict{Applicable: false, Reason: fmt.Sprintf("merge commit tree %s != planned_tree_sha %s — the merged tree is not the reviewed tree (§6.2)", short(mergeTree), short(meta.PlannedTreeSHA))}, ErrTreeMismatch
+		return Verdict{}, reject(ErrTreeMismatch, "merge commit tree %s != planned_tree_sha %s — the merged tree is not the reviewed tree (§6.2)", short(mergeTree), short(meta.PlannedTreeSHA))
 	}
 
 	// 6. §3.1 — the workspace must still be authorized by the config on the
@@ -192,8 +223,8 @@ func (v *Verifier) Verify(ctx context.Context, owner, repo string, pr int, works
 	if err != nil {
 		return Verdict{}, fmt.Errorf("re-reading trusted config: %w", err)
 	}
-	if _, ok := cfg.Workspace(workspace); !ok {
-		return Verdict{Applicable: false, Reason: fmt.Sprintf("workspace %q no longer exists on the trusted ref (§3.1)", workspace)}, ErrTreeMismatch
+	if _, ok := cfg.Workspace(req.Workspace); !ok {
+		return Verdict{}, reject(ErrTreeMismatch, "workspace %q no longer exists on the trusted ref (§3.1)", req.Workspace)
 	}
 
 	// Staleness is not decidable here without running terraform: the §6.3
@@ -201,9 +232,8 @@ func (v *Verifier) Verify(ctx context.Context, owner, repo string, pr int, works
 	// carries the expectation; the caller (or the v0.2 worker) maps Terraform's
 	// refusal to ErrStale with the §6.3 explanation.
 	return Verdict{
-		Applicable: true,
-		Reason:     fmt.Sprintf("plan verified: merged as %s, tree %s matches, signed and kind=pr", short(pull.MergeCommitSHA), short(mergeTree)),
-		Meta:       meta,
+		Reason: fmt.Sprintf("plan verified: merged as %s, tree %s matches, signed and kind=pr", short(pull.MergeCommitSHA), short(mergeTree)),
+		Meta:   meta,
 	}, nil
 }
 
@@ -233,19 +263,17 @@ func WouldApply(v Verdict, workspace string, applyTimeout time.Duration) string 
 		fmt.Sprintf("  merge      %s (tree %s)", short(v.Meta.MergeCommitSHA), short(v.Meta.PlannedTreeSHA)),
 		fmt.Sprintf("  terraform  %s", v.Meta.TerraformVersion),
 	}
-	counts := ""
+	var counts []string
 	for _, action := range []string{"create", "update", "delete", "replace"} {
 		if n := v.Meta.ResourceChangeCounts[action]; n > 0 {
-			if counts != "" {
-				counts += ", "
-			}
-			counts += fmt.Sprintf("%d to %s", n, action)
+			counts = append(counts, fmt.Sprintf("%d to %s", n, action))
 		}
 	}
-	if counts == "" {
-		counts = "no resource changes"
+	changes := "no resource changes"
+	if len(counts) > 0 {
+		changes = strings.Join(counts, ", ")
 	}
-	lines = append(lines, fmt.Sprintf("  changes    %s", counts))
+	lines = append(lines, fmt.Sprintf("  changes    %s", changes))
 	lines = append(lines, "",
 		"Run `terraform apply <downloaded tfplan>` with your own credentials.",
 		"The tool holds no write identity by design (§7).")
