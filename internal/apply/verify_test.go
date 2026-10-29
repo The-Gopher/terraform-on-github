@@ -362,3 +362,22 @@ func TestVerify_RejectsPlanOnlyWorkspace(t *testing.T) {
 		t.Error("plan-only workspace must not be applicable")
 	}
 }
+
+// TestVerify_FastForward: a promotion pushed with `git merge --ff-only` has no
+// merge commit — merge_commit_sha is the head, whose first parent is the
+// head's own parent rather than the base. Tree equality still decides.
+func TestVerify_FastForward(t *testing.T) {
+	f := newFixture(t)
+	f.github.mergeCommit = f.headSHA
+	f.github.parents = []string{"earlier-head-commit"}
+
+	v, err := f.verifier().Verify(context.Background(), "acme", "infra", f.pr, "prod", f.baseSHA, f.headSHA)
+	if err != nil || !v.Applicable {
+		t.Fatalf("fast-forward of the planned head must verify; got %v (%s)", err, v.Reason)
+	}
+
+	f.github.mergeTree = "tree-of-something-else"
+	if _, err := f.verifier().Verify(context.Background(), "acme", "infra", f.pr, "prod", f.baseSHA, f.headSHA); !errors.Is(err, ErrTreeMismatch) {
+		t.Fatalf("a fast-forward must still fail tree equality; got %v", err)
+	}
+}
