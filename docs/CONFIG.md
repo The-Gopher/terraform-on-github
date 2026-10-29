@@ -46,6 +46,16 @@ The repo's declaration of which branches control which Terraform.
 Both identities are required, and validated as service-account emails. The config describes what
 the workspace *needs*, not what a particular runner happens to hold.
 
+## `workspaces[].apply`
+
+| Key | Type | Default | Notes |
+|---|---|---|---|
+| `enabled` | bool | `true` | `false` makes the workspace plan-only: PRs into its branch are planned, and `apply verify` refuses every merge. Re-read from the trusted ref at verify time, so disabling it also stops plans already staged. |
+| `environment` | string | the workspace `name` | GitHub Environment the apply deploys to; its protection rules are the approval gate. DESIGN §6.4. |
+| `require_protected_base` | bool | `false` | Refuse to apply unless `branch` is protected with required reviews. Costs the App `administration: read`. DESIGN §3.1.6. **Parsed and printed, not yet enforced by `apply verify`.** |
+| `approval_timeout` | duration | `24h` | How long the apply worker waits for Environment approval before abandoning the run. |
+| `on_stale` | enum | `fail` | `fail` only. `replan_if_equivalent` is recognised and rejected with its explanation. DESIGN §6.3. |
+
 ---
 
 ## Validation rules

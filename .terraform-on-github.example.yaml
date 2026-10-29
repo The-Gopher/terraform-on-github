@@ -41,7 +41,9 @@ workspaces:
       plan: tf-prod-networking-plan@acme-tf.iam.gserviceaccount.com
       apply: tf-prod-networking-apply@acme-tf.iam.gserviceaccount.com
     apply:
+      environment: production        # GitHub Environment whose reviewers gate the apply
       on_stale: fail
+      require_protected_base: true   # refuse to apply unless `main` requires reviews
 
   # Developers merge into `integration` freely. That is safe only because they cannot edit this
   # file — it lives on the trusted ref — so the most they can reach is this identity.
@@ -69,4 +71,5 @@ workspaces:
     impersonate:
       plan: tf-prod-networking-plan@acme-tf.iam.gserviceaccount.com
       apply: tf-prod-networking-apply@acme-tf.iam.gserviceaccount.com
-    apply: {}   # no apply verb wired yet; this workspace is plan-only for now
+    apply:
+      enabled: false   # plan-only: release/* PRs get a plan, never an apply

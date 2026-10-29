@@ -127,7 +127,12 @@ func printConfig(w io.Writer, cfg *config.Config) {
 		fmt.Fprintf(w, "    terraform:   %s\n", ws.TerraformVersion)
 		fmt.Fprintf(w, "    backend:     gs://%s/%s\n", ws.Backend.Bucket, ws.Backend.Prefix)
 		fmt.Fprintf(w, "    impersonate: plan=%s apply=%s\n", ws.Impersonate.Plan, ws.Impersonate.Apply)
-		fmt.Fprintf(w, "    apply:       enabled, environment=%s on_stale=%s\n", ws.Environment(), ws.Apply.OnStale)
+		if ws.ApplyEnabled() {
+			fmt.Fprintf(w, "    apply:       enabled, environment=%s on_stale=%s require_protected_base=%t\n",
+				ws.Environment(), ws.Apply.OnStale, ws.Apply.RequireProtectedBase)
+		} else {
+			fmt.Fprintln(w, "    apply:       disabled (plan-only)")
+		}
 	}
 }
 

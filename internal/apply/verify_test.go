@@ -100,7 +100,7 @@ func (f *fakeGitHub) CommitParents(_ context.Context, _, _, _ string) ([]string,
 }
 
 // fakeContents serves the trusted-ref config: one workspace named prod.
-type fakeContents struct{ missingWorkspace bool }
+type fakeContents struct{ missingWorkspace, planOnly bool }
 
 func newFakeContents() *fakeContents { return &fakeContents{} }
 
@@ -133,6 +133,9 @@ workspaces:
 func (f *fakeContents) ReadFileAtSHA(_ context.Context, _, _, _, _ string) ([]byte, error) {
 	if f.missingWorkspace {
 		return []byte(fixtureConfigOther), nil
+	}
+	if f.planOnly {
+		return []byte(fixtureConfig + "    apply: {enabled: false}\n"), nil
 	}
 	return []byte(fixtureConfig), nil
 }
@@ -342,5 +345,20 @@ func TestVerify_WorkspaceDeauthorizedAfterPlan(t *testing.T) {
 	}
 	if v.Applicable {
 		t.Error("deauthorized workspace must not be applicable")
+	}
+}
+
+// TestVerify_RejectsPlanOnlyWorkspace: apply.enabled: false on the trusted ref
+// means a merge into that branch is never applicable, however good the plan.
+func TestVerify_RejectsPlanOnlyWorkspace(t *testing.T) {
+	f := newFixture(t)
+	f.contents.planOnly = true
+
+	v, err := f.verifier().Verify(context.Background(), "acme", "infra", f.pr, "prod", f.baseSHA, f.headSHA)
+	if !errors.Is(err, ErrApplyDisabled) {
+		t.Fatalf("got %v, want ErrApplyDisabled", err)
+	}
+	if v.Applicable {
+		t.Error("plan-only workspace must not be applicable")
 	}
 }

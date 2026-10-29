@@ -214,6 +214,10 @@ func (c *Config) Normalize() {
 		if len(w.PlanArgs) == 0 {
 			w.PlanArgs = d.PlanArgs
 		}
+		if w.Apply.Enabled == nil {
+			enabled := true
+			w.Apply.Enabled = &enabled
+		}
 		if w.Apply.OnStale == "" {
 			w.Apply.OnStale = StaleFail
 		}
