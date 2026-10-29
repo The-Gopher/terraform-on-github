@@ -91,6 +91,9 @@ var (
 	// whose state lineage or serial moved. on_stale: fail is the only v1
 	// behaviour — a human re-plans, the tool never re-plans-and-applies.
 	ErrStale = errors.New("saved plan is stale")
+	// ErrApplyDisabled is a plan-only workspace (apply.enabled: false) — the
+	// plan was legitimate, and it is never applicable.
+	ErrApplyDisabled = errors.New("workspace is plan-only")
 )
 
 // Verify runs the whole gauntlet and returns the first failure as a verdict.
@@ -109,7 +112,8 @@ var (
 //  5. §6.2 tree equality: merge_commit^{tree} == meta.PlannedTreeSHA — survives
 //     squash/rebase/merge-commit, rejects a moved base
 //  6. §3.1 config re-authorization: the workspace still exists on the trusted
-//     ref's current tip (fail-closed on change, per LoadFromTrustedRef)
+//     ref's current tip (fail-closed on change, per LoadFromTrustedRef) and
+//     is not plan-only
 func (v *Verifier) Verify(ctx context.Context, owner, repo string, pr int, workspace, baseSHA, headSHA string) (Verdict, error) {
 	metaKey := store.Key(owner, repo, workspace, baseSHA, headSHA, store.NameMeta)
 	planKey := store.Key(owner, repo, workspace, baseSHA, headSHA, store.NamePlan)
@@ -192,8 +196,12 @@ func (v *Verifier) Verify(ctx context.Context, owner, repo string, pr int, works
 	if err != nil {
 		return Verdict{}, fmt.Errorf("re-reading trusted config: %w", err)
 	}
-	if _, ok := cfg.Workspace(workspace); !ok {
+	ws, ok := cfg.Workspace(workspace)
+	if !ok {
 		return Verdict{Applicable: false, Reason: fmt.Sprintf("workspace %q no longer exists on the trusted ref (§3.1)", workspace)}, ErrTreeMismatch
+	}
+	if !ws.ApplyEnabled() {
+		return Verdict{Applicable: false, Reason: fmt.Sprintf("workspace %q is plan-only on the trusted ref (apply.enabled: false)", workspace)}, ErrApplyDisabled
 	}
 
 	// Staleness is not decidable here without running terraform: the §6.3

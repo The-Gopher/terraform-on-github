@@ -90,6 +90,32 @@ func TestApplyDefaults(t *testing.T) {
 	}
 }
 
+func TestApplyPolicyKeys(t *testing.T) {
+	c, err := ParseAndValidate(exampleConfig(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	prod, _ := c.Workspace("prod-networking")
+	integration, _ := c.Workspace("integration")
+	next, _ := c.Workspace("prod-networking-next")
+
+	if got := prod.Environment(); got != "production" {
+		t.Errorf("prod-networking environment: got %q, want the explicit production", got)
+	}
+	if got := integration.Environment(); got != "integration" {
+		t.Errorf("integration environment should default to the workspace name, got %q", got)
+	}
+	if !prod.Apply.RequireProtectedBase || integration.Apply.RequireProtectedBase {
+		t.Error("require_protected_base should be true on prod-networking only")
+	}
+	if !prod.ApplyEnabled() || !integration.ApplyEnabled() {
+		t.Error("apply should default to enabled")
+	}
+	if next.ApplyEnabled() {
+		t.Error("prod-networking-next sets apply.enabled: false and must be plan-only")
+	}
+}
+
 func withReplacement(t *testing.T, old, new string) []byte {
 	t.Helper()
 	s := string(exampleConfig(t))

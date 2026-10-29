@@ -146,6 +146,20 @@ type Impersonate struct {
 
 // ApplyPolicy governs what happens after merge.
 type ApplyPolicy struct {
+	// Enabled is false for a plan-only workspace: PRs into its branch get a plan, and nothing
+	// merged there is ever applied. A pointer so Normalize can tell an absent key (default true)
+	// from an explicit false.
+	Enabled *bool `yaml:"enabled"`
+
+	// Environment names the GitHub Environment the apply worker deploys to, whose protection
+	// rules are the approval gate (DESIGN.md §6.4). Defaults to the workspace name.
+	Environment string `yaml:"environment"`
+
+	// RequireProtectedBase refuses to apply unless the workspace's base branch is protected with
+	// required reviews — the premise check in DESIGN.md §3.1.6. Per-workspace because it costs
+	// the App `administration: read`. Not yet enforced by apply.Verify.
+	RequireProtectedBase bool `yaml:"require_protected_base"`
+
 	// ApprovalTimeout bounds how long the worker will poll for environment approval. On expiry
 	// the run is abandoned, never applied.
 	ApprovalTimeout Duration `yaml:"approval_timeout"`
@@ -189,8 +203,18 @@ const (
 	StaleReplanIfEquivalent StalePolicy = "replan_if_equivalent"
 )
 
+// Environment is the GitHub Environment an apply of this workspace is gated on.
 func (w Workspace) Environment() string {
+	if w.Apply.Environment != "" {
+		return w.Apply.Environment
+	}
 	return w.Name
+}
+
+// ApplyEnabled reports whether a merge into this workspace's branch may ever be applied.
+// An unnormalized absent key reads as enabled, matching Normalize.
+func (w Workspace) ApplyEnabled() bool {
+	return w.Apply.Enabled == nil || *w.Apply.Enabled
 }
 
 // Workspace looks up a workspace by name.
