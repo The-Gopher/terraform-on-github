@@ -109,6 +109,7 @@ var (
 //     exactly main's tip tree)
 //  3. §5.3 integrity: fetched tfplan bytes hash to meta.PlanSHA256
 //  4. §6.1 re-derivation: PR merged, merge_commit_sha^1 == meta.BaseSHA
+//     (skipped for a fast-forward, where merge_commit_sha is the head)
 //  5. §6.2 tree equality: merge_commit^{tree} == meta.PlannedTreeSHA — survives
 //     squash/rebase/merge-commit, rejects a moved base
 //  6. §3.1 config re-authorization: the workspace still exists on the trusted
@@ -170,12 +171,21 @@ func (v *Verifier) Verify(ctx context.Context, owner, repo string, pr int, works
 	// merge_commit^1 == base_sha: the merge landed on the same base the plan
 	// was built against. A moved base changes the tree too, so §6.2 would also
 	// catch it — but the parent check names the cause instead of the symptom.
-	parents, err := v.GitHub.CommitParents(ctx, owner, repo, pull.MergeCommitSHA)
-	if err != nil {
-		return Verdict{}, fmt.Errorf("reading merge commit parents: %w", err)
-	}
-	if len(parents) == 0 || parents[0] != baseSHA {
-		return Verdict{Applicable: false, Reason: fmt.Sprintf("merge commit's first parent is %s, planned base was %s (§6.1)", short(first(parents)), short(baseSHA))}, ErrBaseMoved
+	//
+	// Except under a fast-forward, where there is no merge commit: the head was
+	// pushed onto the base and GitHub reports the head itself as
+	// merge_commit_sha. Its first parent is the head's own parent, which is the
+	// base only for a one-commit PR. §4.1 already proved at plan time that the
+	// head contains base_sha, and §6.2 below still requires the applied tree to
+	// be the planned one, so the parent check has nothing left to add.
+	if pull.MergeCommitSHA != headSHA {
+		parents, err := v.GitHub.CommitParents(ctx, owner, repo, pull.MergeCommitSHA)
+		if err != nil {
+			return Verdict{}, fmt.Errorf("reading merge commit parents: %w", err)
+		}
+		if len(parents) == 0 || parents[0] != baseSHA {
+			return Verdict{Applicable: false, Reason: fmt.Sprintf("merge commit's first parent is %s, planned base was %s (§6.1)", short(first(parents)), short(baseSHA))}, ErrBaseMoved
+		}
 	}
 
 	// 5. §6.2 — tree-SHA equality. The merge commit SHA is new under squash and
